@@ -6,7 +6,9 @@ library(readxl)
 library(lubridate)
 
 IPOData <- read_xlsx("IPOinTaiwan_1106.xlsx")
+DelistData <- read_xlsx("DelistCompanies.xlsx")
 colnamesinIPOData <- names(IPOData) %>% as.data.frame()
+DelistFirms_Data <- read_xlsx("DelistFirms_undealwith.xlsx") %>% as.data.table
 
 # date range : 2002-01-01 ~ 2014-12-31
 # 金融控＋證券＋金融業＋壽險 = 22
@@ -118,8 +120,56 @@ test <- setDT(IPOinTaiwan) %>%
   .[, .SD, .SDcols = c("公司中文簡稱", "首次掛牌市場", "首次掛牌代碼", "首次掛牌日期")] %>% 
   .[year(`首次掛牌日期`) == 2003]
 
+# Delist Firm 
+DelistFirm <- setDT(DelistData) %>%
+  .[`下市日期` >= ymd("2002/01/01")] %>% 
+  .[order(`下市日期`)]
+  
 
+# Delist firms 
+colname <- c(1, 3, 6, 8, 18, 21:24, 32:40)
+DelistFirms <- DelistFirms_Data %>% 
+  .[is.na(前一次變更市場) == F & 前一次變更市場 != "ROTC"] %>% 
+  .[前一次變更代碼日期 >= ymd("20020101") & 前一次變更代碼日期 <= ymd("20141231")] %>% 
+  .[首次掛牌日期 >= ymd("20020101") & 首次掛牌日期 <= ymd("20141231")] %>% 
+  .[首次掛牌TSE產業 != "M3000 証券"] %>% 
+  .[, .SD, .SDcols = colname] %>% 
+  .[, SurvivalLife := round((下市日期- 前一次變更代碼日期)/365, 2)] %>% 
+  .[order(下市日期)]
 
+# 五年內下市櫃的公司共有 33家
+SurviveLessThan5Years <- DelistFirms %>% 
+  .[SurvivalLife <= 5]
+
+# 產業來說以 電子工業佔據絕大多數
+table(SurviveLessThan5Years$首次掛牌TSE產業)
+
+# 可發現 2016 2018年的失敗公司最多
+CountDelistInEachYear <- DelistFirms$下市日期 %>% 
+  year() %>% 
+  table() %>% 
+  as.data.table %>% 
+  rename("Year" = ".")
+
+CountDelistInEachYear %>% 
+  ggplot(., aes(x = Year, y = N)) +
+  stat_summary(fun.y = sum, geom = "bar", fill = "skyblue") +
+  geom_label(aes(label= N)) +
+  ggtitle("Delist Q In Each Year")
+
+# 判定為五年內下市櫃的公司中，2006 - 2008 為失敗比例最高 因此可能得考慮金融風暴
+CountDelistInEachYear_filter5year <- SurviveLessThan5Years$下市日期 %>% 
+  year() %>% 
+  table() %>% 
+  as.data.table %>% 
+  rename("Year" = ".")
+
+CountDelistInEachYear_filter5year %>% 
+  ggplot(., aes(x = Year, y = N)) +
+  stat_summary(fun.y = sum, geom = "bar", fill = "skyblue") +
+  geom_label(aes(label= N)) +
+  ggtitle("Delist Q In Each Year")
+  
 
 
 
