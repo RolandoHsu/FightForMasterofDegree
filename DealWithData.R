@@ -1,11 +1,11 @@
 library(tidyverse)
 library(ggplot2)
 library(stringr)
-library(data.table)
 library(readxl)
 library(lubridate)
 library(PerformanceAnalytics)
 library(ggrepel)
+library(data.table)
 
 ##### 注意 #####
 #ListFirm 包含上市上櫃下市下櫃
@@ -18,6 +18,11 @@ DelistFirms_Data <- read_xlsx("DelistFirms_undealwith.xlsx") %>% as.data.table
 FullCashDeliveryStock_Data <- read_xlsx("FullCashDeliveryStock.xlsx") %>% as.data.table
 Price_Vol_FCDS_Data <- read_xlsx("StockPrice_Vol_FCDS.xlsx") %>% as.data.table()
 ListFirm_Data <- read_xlsx("上市公司_1111.xlsx") %>% as.data.table()
+MandA_Data <- read_xlsx("併購data.xlsx") %>% as.data.table()
+load("ROTCPriceData.RData") %>% as.data.table()
+MarketReturn_Data <- read_xlsx("MarketReturn.xlsx") %>% 
+  as.data.table() %>% 
+  .[, .SD, .SDcols = c("年月日", "市場投組", "無風險利率")]
 
 ##### 產業特性 #####
 # 共有641個樣本
@@ -27,20 +32,64 @@ ListFirm <- ListFirm_Data %>%
   .[!(`TSE新產業名` %in% c("M2800 金融業"))] %>% 
   .[`前一次變更代碼日期` <= "2014-12-31 UTC" & `前一次變更代碼日期` >= "2002-06-30 UTC"] %>% 
   .[!(`前二次變更市場` == "OTC") | is.na(`前二次變更市場`) == T] %>% 
-  .[, SurvivalYears := round((`下市日期` - `前一次變更代碼日期`)/365, 2)]
+  .[, SurvivalYears := round((`下市日期` - `前一次變更代碼日期`)/365, 2)] %>% 
+  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
+  .[ROTC_Time >= 0.5] # 興櫃時間超過六個月
+  
 
-# 下市公司為65個
+names(ListFirm)
+
+# Get the Company's Code list 
+write.csv(ListFirm$前一次變更代碼, file = "CompanyCodeList.csv")
+
+##### 併購公司清單 ##### 
+MandA <- MandA_Data %>% 
+  .[`事件日` >= ymd("2002-01-01")] %>% 
+  .[, `:=` (MajorComCode = str_split(主併公司碼, " ", simplify = T)[, 1])] %>% 
+  .[, .SD, .SDcols = c(18,4, 2, 3, 5:17)] %>% 
+  .[!(`主併公司產業名` %in% c("金融業", "証券", "金融控", "壽險"))]
+
+test <- ListFirm %>% 
+  .[前一次變更代碼 %in% MandA$MajorComCode] %>% 
+  .[order(`前一次變更代碼`)]
+
+test2 <- MandA %>% 
+  .[MajorComCode %in% ListFirm$前一次變更代碼] %>% 
+  .[order(MajorComCode)]
+
+test3 <- ListFirm %>%
+  .[前一次變更代碼 %in% MandA$被併公司碼] %>% 
+  .[order(`前一次變更代碼`)]
+
+test4 <- MandA %>% 
+  .[`被併公司碼` %in% ListFirm$前一次變更代碼] %>% 
+  .[order(`被併公司碼`)]
+
+# 被併公司有無在那個時間下市
+test5 <- DelistFirm %>% 
+  .[`前一次變更代碼` %in% MandA$MajorComCode]
+test6 <- DelistFirm %>% 
+  .[`前一次變更代碼` %in% MandA$被併公司碼] %>% 
+  .[, .SD, .SDcols = c("前一次變更代碼", "下市日期" , "前一次變更市場")] %>% 
+  rename("Code" = "前一次變更代碼") %>% 
+  left_join(., MandA %>% 
+              .[, .SD, .SDcols = c("MajorComCode", "主併公司名", "事件日", "併購事件", "被併公司碼", "被併公司名")] %>% 
+              rename("Code" = "被併公司碼"),
+            by = "Code")
+
+# 下市公司為48個 (有17家為併購)
 DelistFirm <- ListFirm %>% 
-  .[is.na(`下市日期`) == F ]
+  .[is.na(`下市日期`) == F ] #%>% 
+  #.[!(`前一次變更代碼` %in% MandA$MajorComCode)]
 
-# 下市公司中 平均的存活年數為6.99年：
+# 下市公司中 平均的存活年數為7年：
 DelistFirm %>% 
   pull(SurvivalYears) %>%
   as.numeric() %>% 
   mean() %>% 
   round(., 2)
 
-# 五年內下市的公司共有25家
+# 五年內下市的公司共有20家
 DelistWithin5Years <- DelistFirm %>% 
   .[SurvivalYears <= 5]
 
@@ -92,13 +141,13 @@ ListFirm_Ele <- ListFirm %>%
   pull(Ele) %>% 
   table
 
-# 下市櫃公司中 電子工業 44 非電子工業 21家 
+# 下市櫃公司中 電子工業 34 非電子工業 14家 
 DelistFirm %>% 
   .[, Ele := ifelse(`首次掛牌TSE產業` == "M2300 電子工業", 1, 0)] %>% 
   pull(Ele) %>% 
   table
 
-# 五年內下市櫃公司中 電子工業 15 非電子工業 10家 
+# 五年內下市櫃公司中 電子工業 13 非電子工業 7家 
 DelistWithin5Years %>% 
   .[, Ele := ifelse(`首次掛牌TSE產業` == "M2300 電子工業", 1, 0)] %>% 
   pull(Ele) %>% 
@@ -251,6 +300,76 @@ AverageTimeToCrisis <- CrisisTime %>%
   median() %>% 
   round(., 2) %>% 
   paste0("平均 ", .," 個月")
+
+# 重大危機大類別
+CauseOfBigTypeRatio <- CauseofCrisis %>% 
+  pull(CauseOfBigType) %>% 
+  table() %>% 
+  as.data.frame() %>% 
+  rename("CauseOfBigType" = ".")
+
+png("重大危機事件 類別頻率.png", width = 11, height = 8, units = 'in', res = 300)
+ggplot(data = CauseOfBigTypeRatio)+
+  geom_bar(aes(x = CauseOfBigType, y = Freq), stat = "identity", fill = "#007979")+
+  geom_label(aes(x = CauseOfBigType, y = Freq, label = Freq), data = CauseOfBigTypeRatio) +
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "aliceblue"), 
+        panel.background = element_rect(fill = "aliceblue"),
+        legend.background = element_rect(fill = "aliceblue")) +
+  xlab("重大危機事件")+
+  ggtitle("重大危機事件 類別頻率")
+dev.off()
+
+# 重大財務危機發生頻率
+Crisisratio <- CauseofCrisis %>% 
+  .[CauseOfBigType == "財務危機"] %>% 
+  pull(Cause) %>% 
+  table() %>% 
+  as.data.frame() %>%
+  rename("Cause" = ".") %>% 
+  arrange(desc(Freq))
+
+png("危機事件 類別分佈.png", width = 11, height = 8, units = 'in', res = 300)
+ggplot(data = Crisisratio)+
+  geom_bar(aes(x = Cause, y = Freq), stat = "identity", fill = "#007979")+
+  geom_label(aes(x = Cause, y = Freq, label = Freq), data = Crisisratio) +
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "aliceblue"), 
+        panel.background = element_rect(fill = "aliceblue"),
+        legend.background = element_rect(fill = "aliceblue")) +
+  ylab("Cause")+
+  ggtitle("危機事件 類別分佈")+
+  coord_flip()
+dev.off()
+
+# 重大財務危機 而下市
+CrisisToDelistratio <- CauseofCrisis %>% 
+  .[, DelistFromCrisis := ifelse(Time < 下市日期, 1, 0)] %>% 
+  pull(DelistFromCrisis)
+CrisisToDelistratio[is.na(CrisisToDelistratio)] <- 0
+
+CrisisToDelist <- CrisisToDelistratio %>% 
+  table() %>% 
+  as.data.frame() %>%
+  rename("DelistorNot" = ".") %>% 
+  arrange(desc(Freq))
+
+png("是否因財務危機下市 類別分佈.png", width = 11, height = 8, units = 'in', res = 300)
+ggplot(data = CrisisToDelist)+
+  geom_bar(aes(x = DelistorNot, y = Freq), stat = "identity", fill = "#007979")+
+  geom_label(aes(x = DelistorNot, y = Freq, label = Freq), data = CrisisToDelist) +
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "aliceblue"), 
+        panel.background = element_rect(fill = "aliceblue"),
+        legend.background = element_rect(fill = "aliceblue")) +
+  ggtitle("是否因財務危機下市")
+dev.off()
 
 ##### 下市櫃公司 ##### 
 # 產業來說以 電子工業佔據絕大多數（有8家電子工業沒有新產業名）
@@ -405,19 +524,16 @@ FCDwithCAR %>%
 ##### 平均興櫃時間 #####
 # 上市櫃公司的平均興櫃時間為1.85年 中位數為1.22年 最長可達10年
 SummaryROTCTime <- ListFirm %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
 # 所有下市櫃公司中，興櫃平均時間為1.86年 中位數1.24年
 SummaryROTCTime_DelistFirm <- DelistFirm %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
 # 五年內下市櫃的公司中，興櫃平均時間為1.89年 中位數1.24年
 SummaryROTCTime_DelistWithin5Years <- DelistWithin5Years %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
@@ -425,14 +541,12 @@ SummaryROTCTime_DelistWithin5Years <- DelistWithin5Years %>%
 # 下市櫃公司的電子工業中，平均興櫃時間為1.66年 非電子工業平均為2.28年
 DelistFirm %>% 
   .[首次掛牌TSE產業 == "M2300 電子工業"] %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
 
 DelistFirm %>% 
   .[首次掛牌TSE產業 != "M2300 電子工業"] %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
@@ -441,7 +555,6 @@ DelistFirm %>%
 DelistFirm %>% 
   .[首次掛牌TSE產業 == "M2300 電子工業"] %>% 
   .[SurvivalYears <= 5] %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
@@ -449,7 +562,73 @@ DelistFirm %>%
 DelistFirm %>% 
   .[首次掛牌TSE產業 != "M2300 電子工業"] %>% 
   .[SurvivalYears <= 5] %>% 
-  .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
   pull(ROTC_Time) %>% 
   as.numeric() %>% 
   summary()
+
+##### 找出所有公司的興櫃期間 #####
+RotcTime <- ListFirm %>% 
+  .[, .SD, .SDcols = c("前一次變更代碼", "首次掛牌日期", "前一次變更代碼日期")] %>% 
+  .[, ROTC_Time := round((`前一次變更代碼日期` - `首次掛牌日期`)/365, 2)]
+
+##### 興櫃的股價資料 #####
+MarketReturn <- MarketReturn_Data %>% 
+  .[, Date := ymd(`年月日`)] %>% 
+  .[, .SD, .SDcols = c("Date", "市場投組", "無風險利率")]
+
+names(MarketReturn)
+
+ROTCPrice <- setDT(ROTCPriceData) %>% 
+  .[, .SD, .SDcols = c("證券代碼", "年月日",  "報酬率％")] %>% 
+  .[, Date := ymd(`年月日`)] %>% 
+  left_join(., MarketReturn, by = "Date") %>% 
+  setDT() %>% 
+  .[, .SD, .SDcols = c("證券代碼", "年月日", "報酬率％", "市場投組", "無風險利率")] %>% 
+  .[order(`證券代碼`, `年月日`)]
+
+# 計算所有公司的Market Model 殘差
+GetMarketModelResiduals <- function(Firm){
+  CompanyData <- ROTCPrice %>% 
+    .[`證券代碼` == Firm]
+  MarketModel <- lm(`報酬率％` ~ `市場投組`, data = CompanyData)
+  Residual <- MarketModel$residuals %>% as.data.table 
+  return(Residual)
+}
+MarketModelResidual <- NULL
+for (i in unique(ROTCPrice$證券代碼)) {
+  Residual <- GetMarketModelResiduals(i)
+  MarketModelResidual <- rbind(MarketModelResidual, Residual)
+  print(i)
+}
+  
+ROTCPrice <- cbind(ROTCPrice, MarketModelResidual) %>% 
+  rename("MarketModelResidual" = ".")
+
+SDForEachFirmin10Days_Data <- ROTCPrice %>% 
+  .[, .SD, .SDcols = c("證券代碼", "MarketModelResidual")] %>% 
+  setDT() %>% 
+  .[, rollapply(`MarketModelResidual`, 10, sd, by = 10, align = "left", partial=T), by = `證券代碼`]
+
+SDForEachFirmin10Days <- SDForEachFirmin10Days_Data %>% 
+  .[, id := seq_len(.N), by = "證券代碼"] %>% 
+  .[, Numbering := abs(id - max(id)) + 1, by = "證券代碼"] %>% 
+  .[, .SD, .SDcols = c("證券代碼", "Numbering", "V1")] %>% 
+  .[, AveSD := mean(V1, na.rm = T), by = "Numbering"] %>% 
+  rename("ResidualSD" = "V1") %>% 
+  as.data.table()
+
+rm(SDForEachFirmin10Days)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
