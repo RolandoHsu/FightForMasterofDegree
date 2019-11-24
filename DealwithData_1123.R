@@ -643,3 +643,4 @@ ROTC <- c(600, 11, paste0(round((11/600)*100, 2), "%"))
 WithoutROTC <- c(1033, 97, paste0(round((97/1033)*100, 2), "%"))
 test <- data.table(ROTC, WithoutROTC)
 
+
