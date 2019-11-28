@@ -15,12 +15,12 @@ FirmList_Data <- read_xlsx("FirmList1123.xlsx") %>% as.data.table()
 StopTrading_Data <- read_xlsx("StopTrading_Data.xlsx") %>% 
   rename("公司簡稱" = "証券代碼") %>% 
   as.data.table()
-Price_Vol_FCDS_Data <- read_xlsx("StockPrice_Vol_FCDS.xlsx") %>% as.data.table()
+load("Price_Vol_FCDS_Data.RData") %>% as.data.table()
 load("ROTCPriceData.RData") %>% as.data.table()
 MarketReturn_Data <- read_xlsx("MarketReturn.xlsx") %>% 
   as.data.table() %>% 
   .[, .SD, .SDcols = c("年月日", "市場投組", "無風險利率")]
-
+IPO_Data <- read_xlsx("IPOData.xlsx") %>% as.data.table()
 
 ##### 產業特性 #####
 # 共有600個樣本
@@ -34,11 +34,15 @@ ListFirmWithDuplicate <- FirmList_Data %>%
   .[!(`前二次變更市場` == "OTC") | is.na(`前二次變更市場`) == T] %>% 
   .[, SurvivalYears := round((`下市日期` - `前一次變更代碼日期`)/365, 2)] %>% 
   .[, ROTC_Time := (`前一次變更代碼日期` - `首次掛牌日期`)/365] %>% 
-  .[ROTC_Time >= 0.5]  # 興櫃時間超過六個月
+  .[ROTC_Time >= 0.5] %>% # 興櫃時間超過六個月
+  .[, Age := round((`前一次變更代碼日期`- `設立日期`)/365, 2)] # 到上市櫃前總共已經幾歲了
 
 ListFirm <- ListFirmWithDuplicate %>% 
   data.table(., key = c("公司簡稱", "暫停交易起日")) %>% 
   .[unique(.[,list(`公司簡稱`)]), mult= 'last']
+
+#save(ListFirm, file = "ListFirm.RData")
+#write.csv(ListFirm[, 1:3], "FirmList.csv")
 
 DelistFromMerger <- ListFirm %>% 
   .[is.na(`下市日期`) == F] %>% 
@@ -63,6 +67,8 @@ DelistFirm %>%
 DelistWithin5Years <- DelistFirm %>% 
   .[SurvivalYears <= 6]
 
+save(DelistWithin5Years, file = "DelistWithin5Years.RData")
+
 # 上市公司中 前三多的產業分別為 電子零件組(17.40%) 半導體 (13.51%) 光電業(12.50%)
 Industryratio <- table(ListFirm$TSE新產業名) %>% 
   as.data.frame() %>% 
@@ -72,14 +78,14 @@ Industryratio <- table(ListFirm$TSE新產業名) %>%
 
 png("上市櫃公司 產業分配.png", width = 11, height = 8, units = 'in', res = 300)
 ggplot(data = Industryratio)+
-  geom_bar(aes(x = Var1, y = `IndustryPre (%)`), stat = "identity", fill = "#007979")+
+  geom_bar(aes(x = Var1, y = `IndustryPre (%)`), stat = "identity", fill = "#CD5C5C")+
   geom_label(aes(x = Var1, y = `IndustryPre (%)`, label = `IndustryPre (%)`), data = Industryratio) +
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue")) +
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD")) +
   xlab("產業別")+
   ggtitle("上市櫃公司 產業分配")+
   coord_flip()
@@ -93,16 +99,16 @@ ListFirm %>%
   .[, .SD, .SDcols = c("Year", "Count")] %>% 
   .[, sum(Count), by = "Year"] %>% 
   ggplot(., aes(x = Year, y = V1)) +
-  geom_bar(aes(x = Year, y = V1), stat = "identity", fill = "#007979")+
+  geom_bar(aes(x = Year, y = V1), stat = "identity", fill = "#CD5C5C")+
   geom_label(aes(x = Year, y = V1, label = V1)) +
   ggtitle("每年上市櫃數量")+
   ylab("Count")+
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue"))
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD"))
 dev.off()
 
 # 全641家公司中 電子工業 393 非電子工業 207家 
@@ -154,14 +160,14 @@ FCD_Industryratio <- table(FCDFirms$TSE新產業名) %>%
 
 png("全額交割股 產業分配.png", width = 11, height = 8, units = 'in', res = 300)
 ggplot(data = FCD_Industryratio)+
-  geom_bar(aes(x = Var1, y = `IndustryPre (%)`), stat = "identity", fill = "#007979")+
+  geom_bar(aes(x = Var1, y = `IndustryPre (%)`), stat = "identity", fill = "#CD5C5C")+
   geom_label(aes(x = Var1, y = `IndustryPre (%)`, label = `IndustryPre (%)`), data = FCD_Industryratio) +
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue")) +
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD")) +
   xlab("產業別")+
   ggtitle("全額交割股 產業分配")+
   coord_flip()
@@ -170,6 +176,8 @@ dev.off()
 # 在所有上市櫃公司(沒有下市的)中，共有 19 家在五年內曾經列為全額交割股
 FCDFirms_within5Years <- FCDFirms %>% 
   .[FCD <= 5]
+
+save(FCDFirms_within5Years, file = "FCDFirms_within5Years.RData")
 
 # 五年內列為全額交割股的股票中 11家非電子 8家電子業
 FCDFirms_within5Years %>% 
@@ -196,14 +204,14 @@ QuantitiesofIPOforeachYear <- function(data, industry){
              Count = 1)] %>%
     .[, Count := sum(Count), by = list(Year, `TSE新產業名`)] %>% 
     ggplot(., aes(x = Year, y = Count)) +
-    geom_bar(aes(x = Year, y = Count), stat = "identity", fill = "#007979")+
+    geom_bar(aes(x = Year, y = Count), stat = "identity", fill = "#CD5C5C")+
     geom_label(aes(x = Year, y = Count, label = Count)) +
     theme_classic() +
     theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
           text = element_text(family="黑體-繁 中黑"),
-          plot.background  = element_rect(fill = "aliceblue"), 
-          panel.background = element_rect(fill = "aliceblue"),
-          legend.background = element_rect(fill = "aliceblue")) +
+          plot.background  = element_rect(fill = "#DDDDDD"), 
+          panel.background = element_rect(fill = "#DDDDDD"),
+          legend.background = element_rect(fill = "#DDDDDD")) +
     facet_wrap(~ `TSE新產業名`, scales = "free")
   
   return(Plot)
@@ -216,9 +224,39 @@ png("各產業上市櫃情況(年).png", width = 15, height = 10, units = 'in', 
 QuantitiesofIPOforeachYear(ListFirm, Industrysign)
 dev.off()
 
+# 上市櫃前年齡 
+# 存活公司上市櫃前平均年齡為13.76年 死亡公司則為16.36年 年齡越大 死亡率越高？
+CaculateAge <- function(Data, Var){
+  Age <- Data %>% 
+    pull(Var) %>% 
+    as.numeric() %>% 
+    mean() %>% 
+    round(., 2) %>% 
+    paste0(., "年")
+  
+  return(Age)
+}
+
+ListFirm %>% 
+  CaculateAge(., "Age")
+
+ListFirm %>% 
+  .[!(`公司簡稱` %in% DelistWithin5Years$公司簡稱)] %>% 
+  CaculateAge(., "Age")
+  
+DelistFirm %>% 
+  CaculateAge(., "Age")
+
+DelistWithin5Years %>% 
+  CaculateAge(., "Age")
+
+FCDFirms_within5Years %>% 
+  CaculateAge(., "Age")
+
+
 ##### 重大財務危機 ##### 
 CauseofCrisis_Incomplete <- ListFirm %>% 
-  .[, .SD, .SDcols = c("公司中文簡稱", "危機事件大類別說明", "危機事件類別說明")] %>% 
+  .[, .SD, .SDcols = c("公司中文簡稱", "危機事件大類別說明", "危機事件類別說明")] %>%  
   .[complete.cases(.), ] %>% 
   .[!(str_sub(危機事件類別說明, 1, 7) == "大虧,淨值低5" | str_sub(危機事件類別說明, 1, 4) == "全額下市" | str_sub(危機事件類別說明, 1, 5) == "紓困-財危")] %>% 
   .[, `:=` (CauseOfBigType = str_split(危機事件大類別說明, "[:punct:]", simplify = T)[, 1],
@@ -280,14 +318,14 @@ CauseOfBigTypeRatio <- CauseofCrisis %>%
 
 png("重大危機事件 類別頻率.png", width = 11, height = 8, units = 'in', res = 300)
 ggplot(data = CauseOfBigTypeRatio)+
-  geom_bar(aes(x = CauseOfBigType, y = Freq), stat = "identity", fill = "#007979")+
+  geom_bar(aes(x = CauseOfBigType, y = Freq), stat = "identity", fill = "#CD5C5C")+
   geom_label(aes(x = CauseOfBigType, y = Freq, label = Freq), data = CauseOfBigTypeRatio) +
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue")) +
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD")) +
   xlab("重大危機事件")+
   ggtitle("重大危機事件 類別頻率")
 dev.off()
@@ -303,14 +341,14 @@ Crisisratio <- CauseofCrisis %>%
 
 png("危機事件 類別分佈.png", width = 11, height = 8, units = 'in', res = 300)
 ggplot(data = Crisisratio)+
-  geom_bar(aes(x = Cause, y = Freq), stat = "identity", fill = "#007979")+
+  geom_bar(aes(x = Cause, y = Freq), stat = "identity", fill = "#CD5C5C")+
   geom_label(aes(x = Cause, y = Freq, label = Freq), data = Crisisratio) +
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue")) +
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD")) +
   ylab("Cause")+
   ggtitle("危機事件 類別分佈")+
   coord_flip()
@@ -330,14 +368,14 @@ CrisisToDelist <- CrisisToDelistratio %>%
 
 png("是否因財務危機下市 類別分佈.png", width = 11, height = 8, units = 'in', res = 300)
 ggplot(data = CrisisToDelist)+
-  geom_bar(aes(x = DelistorNot, y = Freq), stat = "identity", fill = "#007979")+
+  geom_bar(aes(x = DelistorNot, y = Freq), stat = "identity", fill = "#CD5C5C")+
   geom_label(aes(x = DelistorNot, y = Freq, label = Freq), data = CrisisToDelist) +
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue")) +
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD")) +
   ggtitle("是否因財務危機下市")
 dev.off()
 
@@ -352,15 +390,15 @@ CountDelistInEachYear <- DelistFirm$下市日期 %>%
 png("每年下市櫃比例.png", width = 11, height = 8, units = 'in', res = 300)
 CountDelistInEachYear %>% 
   ggplot(., aes(x = Year, y = N)) +
-  stat_summary(fun.y = sum, geom = "bar", fill = "#007979") +
+  stat_summary(fun.y = sum, geom = "bar", fill = "#CD5C5C") +
   geom_label(aes(label= N)) +
   ggtitle("每年下市櫃比例")+
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue"))
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD"))
 dev.off()
 
 # 判定為五年內下市櫃的公司中，2006 - 2008 為失敗比例最高 因此可能得考慮金融風暴
@@ -373,15 +411,15 @@ CountDelistInEachYear_filter5year <- DelistWithin5Years$下市日期 %>%
 png("每年下市櫃比例_(五年內).png", width = 11, height = 8, units = 'in', res = 300)
 CountDelistInEachYear_filter5year %>% 
   ggplot(., aes(x = Year, y = N)) +
-  stat_summary(fun.y = sum, geom = "bar", fill = "#007979") +
+  stat_summary(fun.y = sum, geom = "bar", fill = "#CD5C5C") +
   geom_label(aes(label= N)) +
   ggtitle("每年下市櫃比例_(五年內)")+
   theme_classic() +
   theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
         text = element_text(family="黑體-繁 中黑"),
-        plot.background  = element_rect(fill = "aliceblue"), 
-        panel.background = element_rect(fill = "aliceblue"),
-        legend.background = element_rect(fill = "aliceblue"))
+        plot.background  = element_rect(fill = "#DDDDDD"), 
+        panel.background = element_rect(fill = "#DDDDDD"),
+        legend.background = element_rect(fill = "#DDDDDD"))
 dev.off()
 
 ##### 全額交割 與 管理股票 #####
@@ -405,7 +443,7 @@ GetFCDPlotForYear <- function(Firm_sign, Var){
   
   Plot <- Data %>% 
     ggplot(., aes(x = ymd(年月日), y = get(Var))) +
-    geom_point() +
+    geom_point(colour = "#CD5C5C") +
     geom_smooth() +
     theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
           text = element_text(family="黑體-繁 中黑")) + # 解決中文亂碼問題
@@ -413,9 +451,9 @@ GetFCDPlotForYear <- function(Firm_sign, Var){
     theme_classic() +
     theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
           text = element_text(family="黑體-繁 中黑"),
-          plot.background  = element_rect(fill = "aliceblue"), 
-          panel.background = element_rect(fill = "aliceblue"),
-          legend.background = element_rect(fill = "aliceblue"))
+          plot.background  = element_rect(fill = "#DDDDDD"), 
+          panel.background = element_rect(fill = "#DDDDDD"),
+          legend.background = element_rect(fill = "#DDDDDD"))
   
   return(Plot)
 }
@@ -427,7 +465,25 @@ FirmSign <- FullCashDeliveryStocks_FCDDate %>%
   as.character() 
 FirmSign[1:5]
 
-map(FirmSign[1:5], function(x){GetFCDPlotForYear(x, "收盤價(元)")})
+map(FirmSign[5:10], function(x){GetFCDPlotForYear(x, "收盤價(元)")})
+
+png("StockPrice_3205.png", width = 11, height = 8, units = 'in', res = 300)
+GetFCDPlotForYear("3205", "收盤價(元)")
+dev.off()
+
+png("StockPrice_3252.png", width = 11, height = 8, units = 'in', res = 300)
+GetFCDPlotForYear("3252", "收盤價(元)")
+dev.off()
+
+png("StockPrice_2724.png", width = 11, height = 8, units = 'in', res = 300)
+GetFCDPlotForYear("2724", "收盤價(元)")
+dev.off()
+
+png("StockPrice_4198.png", width = 11, height = 8, units = 'in', res = 300)
+GetFCDPlotForYear("4198", "收盤價(元)")
+dev.off()
+
+
 
 # 計算 全額交割股的 認列後累積一年報酬 發現19家公司中 13家為負 6家為正
 GetFCDP_CAR_ForYear <- function(Firm_sign){
@@ -502,8 +558,52 @@ SummaryROTCTime_DelistWithin5Years <- DelistWithin5Years %>%
   as.numeric() %>% 
   summary()
 
-# 下市櫃公司的電子工業中，平均興櫃時間為1.716年 非電子工業平均為2.44年 
-# 平均多了8.7個月
+# 失敗公司
+SummaryROTCTime_FailureFirms <- ListFirm %>% 
+  .[`公司簡稱` %in% c(DelistWithin5Years$公司簡稱, FCDFirms_within5Years$公司簡稱)] %>% 
+  pull(ROTC_Time) %>% 
+  as.numeric() %>% 
+  summary()
+
+# 存活公司
+SummaryROTCTime_UnFailureFirms <- ListFirm %>% 
+  .[!(`公司簡稱` %in% c(DelistWithin5Years$公司簡稱, FCDFirms_within5Years$公司簡稱))] %>% 
+  pull(ROTC_Time) %>% 
+  as.numeric() %>% 
+  summary()
+
+# 失敗且為電子公司
+ListFirm %>% 
+  .[`公司簡稱` %in% c(DelistWithin5Years$公司簡稱, FCDFirms_within5Years$公司簡稱)] %>% 
+  .[ElectricOrNot == 1] %>% 
+  pull(ROTC_Time) %>% 
+  as.numeric() %>% 
+  summary
+
+# 存活且為電子公司
+ListFirm %>% 
+  .[!(`公司簡稱` %in% c(DelistWithin5Years$公司簡稱, FCDFirms_within5Years$公司簡稱))] %>% 
+  .[ElectricOrNot == 1] %>% 
+  pull(ROTC_Time) %>% 
+  as.numeric() %>% 
+  summary
+
+# 失敗且非電子公司
+ListFirm %>% 
+  .[`公司簡稱` %in% c(DelistWithin5Years$公司簡稱, FCDFirms_within5Years$公司簡稱)] %>% 
+  .[ElectricOrNot == 0] %>% 
+  pull(ROTC_Time) %>% 
+  as.numeric() %>% 
+  summary
+
+# 存活且為電子公司
+ListFirm %>% 
+  .[!(`公司簡稱` %in% c(DelistWithin5Years$公司簡稱, FCDFirms_within5Years$公司簡稱))] %>% 
+  .[ElectricOrNot == 0] %>% 
+  pull(ROTC_Time) %>% 
+  as.numeric() %>% 
+  summary
+
 DelistFirm %>% 
   .[ElectricOrNot == 1] %>% 
   pull(ROTC_Time) %>% 
@@ -626,6 +726,11 @@ DelistFirm_DonotHaveROTC <- ListFirm_DonotHaveROTC %>%
   .[order(`下市日期`)] %>% 
   .[, SurvivalYears := round((`下市日期` - `最近上市日`)/365, 2)] 
 
+FCDFirmsWithIn5Years_DonotHaveROTC <- ListFirm %>% 
+  .[!(`公司簡稱` %in% DelistFirm_DonotHaveROTC$公司簡稱)] %>% 
+  .[is.na(`全額交割起日(一)`) == F] %>% 
+  .[, FCD := round((`全額交割起日(一)` - `前一次變更代碼日期`)/365, 2)]
+
 # 下市公司中 平均的存活年數為9.48年(沒有興櫃資料的)
 DelistFirm_DonotHaveROTC %>% 
   pull(SurvivalYears) %>%
@@ -641,6 +746,15 @@ DelistWithin5Years_DonotHaveROTC <- DelistFirm_DonotHaveROTC %>%
 # 五年內下市的機率（區分為有興櫃 1.83% 與 沒有興櫃9.39%）
 ROTC <- c(600, 11, paste0(round((11/600)*100, 2), "%"))
 WithoutROTC <- c(1033, 97, paste0(round((97/1033)*100, 2), "%"))
-test <- data.table(ROTC, WithoutROTC)
+DelistRatioWithROTCOrNot <- data.table(ROTC, WithoutROTC)
+
+
+
+
+
+
+
+
+
 
 
