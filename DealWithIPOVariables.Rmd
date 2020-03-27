@@ -1,0 +1,1586 @@
+---
+title: "IPOVariable"
+author: "Rolando"
+date: "1/18/2020"
+output: 
+  html_document :
+    toc : TRUE
+    toc_depth : 2
+    toc_float :
+      collapsed : TRUE
+      smooth_scroll : TRUE
+    number_selection : TRUE 
+    code_folding : hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/xubodun/Desktop/FightForMasterOfDegree")
+```
+
+```{r echo = FALSE, include = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(readxl)
+library(lubridate)
+library(PerformanceAnalytics)
+library(ggrepel)
+library(data.table)
+library(knitr)
+library(plyr)
+library(rmdWidgets)
+library(kableExtra)
+library(formattable)
+```
+
+```{r Import Data, echo = TRUE, include = FALSE}
+load("Data/ListFirm.RData") # 最後整理出的所有公司清單
+
+IPO_Data <- read_xlsx("Data/IPO_Data.xlsx") %>% 
+  dplyr::rename("公司簡稱" = "公司") %>% 
+  setDT()
+
+MarketReturn_Data <- read_xlsx("Data/MarketReturn2000_2014.xlsx") %>%
+  setDT() %>% 
+  .[, `報酬率` := `報酬率` / 100] 
+
+# 建立FailData_ToJoin以便後續join來計算IPO失敗與否的差異
+FailData_ToJoin <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPOFail")]
+
+```
+
+```{r SomeFunctionToUse, echo = TRUE, include = FALSE}
+
+# 以下funciton皆可使用lapply進行多個變數計算，EX: 
+# lapply(c("經理人質押股%", "大股東質押%", "董監質押股%"), 
+#        function(x) GetSummaryGroupByIPOFailAndTotal(Pledge, x))[[2]]
+
+
+# 計算需要用到的變數的summary 且有區分IPO是否失敗
+GetSummaryGroupByIPOFailAndTotal <- function(Data, Variable){
+  
+  Summary_Total <- Data %>% 
+    .[, .SD, .SDcols = c("IPOFail", Variable)] %>% 
+    psych::describe(.) %>% 
+    setDT() %>% 
+    .[, Type := "Total"] %>% 
+    .[, .SD, .SDcols = c("Type", "n", "mean", "median", "min", "max", 
+                         "range", "skew", "kurtosis")] %>% 
+    .[2]
+  
+  IPO_NoFail_Summary <- Data %>%
+    .[, .SD, .SDcols = c("IPOFail", Variable)] %>% 
+    psych::describeBy(., group = .$IPOFail) %>% 
+    .[[1]] %>% 
+    setDT() %>% 
+    .[, Type := "IPO_NoFail"] %>% 
+    .[, .SD, .SDcols = c("Type", "n", "mean", "median", "min", "max", 
+                         "range", "skew", "kurtosis")] %>% 
+    .[2]
+
+  IPO_Fail_Summary <- Data %>%
+    .[, .SD, .SDcols = c("IPOFail", Variable)] %>% 
+    psych::describeBy(., group = .$IPOFail) %>% 
+    .[[2]] %>% 
+    setDT() %>% 
+    .[, Type := "IPO_Fail"] %>% 
+    .[, .SD, .SDcols = c("Type", "n", "mean", "median", "min", "max", 
+                         "range", "skew", "kurtosis")] %>% 
+    .[2]
+
+  Summary <- Summary_Total %>% 
+    rbind(., IPO_NoFail_Summary, IPO_Fail_Summary) %>% 
+    setDT() %>% 
+    setnames(., "Type" , Variable)
+
+  return(Summary)
+}
+
+# 計算以變數平均做區分後，IPO失敗與否的次數分配 EX: 將variable超過variable平均列為1，不是為0，接著區分IPO失敗與否看是否次數分配有大量差異
+GetTableGroupByIPOFailOrNot <- function(data, variable){
+  
+  IPO_UnFailResult <- data %>% 
+    .[, Result := ifelse(get(variable) >= mean(get(variable)), 1, 0)] %>% 
+    .[, .SD, .SDcols = c("IPOFail", "Result")] %>% 
+    .[IPOFail == 0] %>% 
+    pull(Result) %>% 
+    table() %>% 
+    as.data.table %>% 
+    .[, Sign := "IPO_UnFail"]
+  
+  IPO_FailResult <- data %>% 
+    .[, Result := ifelse(get(variable) >= mean(get(variable)), 1, 0)] %>% 
+    .[, .SD, .SDcols = c("IPOFail", "Result")] %>% 
+    .[IPOFail == 1] %>% 
+    pull(Result) %>% 
+    table() %>% 
+    as.data.table %>% 
+    .[, Sign := "IPO_Fail"]
+  
+  Result <- IPO_UnFailResult %>% 
+    rbind(., IPO_FailResult) %>% 
+    setnames(., old = ".", new = "是否大於平均") %>% 
+    .[, `Freq(%)` := round((N / sum(N))*100, 2), by = "Sign"] %>% 
+    .[, .SD, .SDcols = c("Sign", "是否大於平均", "N", "Freq(%)")]
+    
+  return(Result)
+}
+
+# 以IPO失敗與否分群畫出point plot 以看變數是否因IPO失敗與否而有所區別
+GeomPoint_IPOFailOrNot <- function(data, variable){
+  data %>% 
+    .[, `:=`(IPOFail = as.character(IPOFail),
+             Firm = 1:nrow(data))] %>% 
+    ggplot(data = .) +
+    geom_point(mapping = aes(x = Firm, 
+                           y = get(variable), 
+                           colour = IPOFail)) +
+    ggtitle(str_c(variable, "_以IPOFailOrNot區分")) +
+    ylab(variable) +
+    theme_classic() +
+    theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+}
+
+```
+
+## 文件目的
+
+* 此Code是為了要整理所有IPO程序變數，最後會將整理好的所有變數匯入至FinalData中。
+
+* 以下將陳列所有IPO程序變數。
+
+## IPO程序變數清單
+
+```{r echo = TRUE}
+IPOVariables <- c("Offer Price", 
+                  "Participation Ratio (IPO前現任股東出售的股票份額)", 
+                  "Underwriter’s Reputation", 
+                  "Underpricing (First Day Return)", 
+                  "Firm Age", 
+                  "High Tech Dummy", 
+                  "Waiting Day (申請日期與正式發行日期的時間差距)", 
+                  "Market Return Prior IPO (計算IPO申請日期前一個月之市場平均報酬)",  
+                  "Other IPO First Day Return (IPO前90天其他IPO公司首日報酬)", 
+                  "Other IPO Initial Return (IPO前90天其他IPO公司初期報酬)", 
+                  "VC Dummy", 
+                  "Institutional Ownership (機構投資人持股比例)", 
+                  "Price Revision (( 承銷價 / price range的中點 ) - 1)", 
+                  "Market Heat Degree (某一季的總IPO數量與過去4季的比)", 
+                  "MarketValueOnIPODay (IPO首日交易日結束後的股票市值, 與上市(櫃)限制作比較)",
+                  "Underwriting Amount", 
+                  "Big4Natl (前四大會計公司 Dummy)", 
+                  "NumIPO (IPO若大於前四季的數量平均50%以上，則為熱季)", 
+                  "EWU (以當季平均的Underpricing嚴重程度作為是否為發行熱季的判斷準則, 
+                  與前四季做比較)", 
+                  "Insider Ownership (探討IPO前三個月公司內部人士持股變化)",
+                  "Insider Ownership_ROTC (探討興櫃初期與IPO當下(或IPO後一季)是否有大量改變)",
+                  "Lead percentage Sell (The percentage of shares sold by the lead)",
+                  "Previous price discount (The average price discount in the previous three years)", 
+                  "IPO前三個月員工認購率", 
+                  "各機構持股比例(包含法人、金融機構、信託、個人)",
+                  "質押比率",
+                  "獨立董事人數", 
+                  "興櫃時間")
+
+rmd_checkbox(IPOVariables, 
+             selected = c(1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28), 
+             label = kableExtra::text_spec("IPOVariables", italic = T),
+             label_inline = F,
+             inline = F)
+
+```
+
+## 1. 不需額外處理的變數
+
+*  承銷價格(元), FirstDayReturn(%), 平均中籤率, 總承銷股數(千股), 承銷金額(千元), ROTC_Time, ElectricOrNot, FirmAgeBeforeIPO。
+
+* Market: 當市場為 **TSE** Market 定義為 1，**OTC** 則為0。
+
+* 整理成 **IPO_DoNotNeedToDealWith** 的資料，可用於合併入最終data中。
+
+```{r echo = TRUE}
+IPO_DoNotNeedToDealWith <- IPO_Data %>% 
+  left_join(., ListFirm, by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, `FirstDayReturn(%)` := ((`上市日收盤價(元)` - `承銷價格(元)`) / `承銷價格(元)`)*100] %>% 
+  .[, Market := ifelse(Market == "TSE", 1, 0)] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPOFail" , "Market", "承銷價格(元)", "FirstDayReturn(%)", 
+                       "平均中籤率","總承銷股數(千股)", "承銷金額(千元)", "ROTC_Time", 
+                       "ElectricOrNot", "FirmAgeBeforeIPO")]
+
+
+names(IPO_DoNotNeedToDealWith)
+```
+
+## 2. 承銷商名聲
+
+* **MEGGINSON and WEISS (1991)** ，利用整個2002~2014整個研究期間各承銷商承銷量佔比，作為承銷商聲譽的代理變數。
+
+* 做出**UnderwriterReputation_ToJoin**，用以合併入最終data中。
+
+* 從summary的結果來看，IPOFail的公司平均來說，他們的承銷商會有較低的佔比，也就是說，IPOFail的公司相對來說他們的承銷商聲譽略低於IPO_NotFail的公司，但差距並不明顯。（6.47 % v.s 6.26 %）
+
+```{r echo = TRUE}
+UnderwriterReputation_Data <- IPO_Data %>% 
+  .[, .SD, .SDcols = c("主辦證券商", "承銷金額(千元)")] %>% 
+  .[, sum(`承銷金額(千元)`), by = "主辦證券商"] %>% 
+  setnames(., old = "V1", new = "UnderwritingAmount") %>% 
+  .[, UnderWritingPercentage := (UnderwritingAmount / sum(UnderwritingAmount))*100] %>% 
+  .[order(UnderWritingPercentage, decreasing = FALSE)] 
+
+UnderwriterReputation <- IPO_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "主辦證券商")] %>% 
+  left_join(., UnderwriterReputation_Data[, -2], by = "主辦證券商") %>% 
+  left_join(., ListFirm[, c(1, 15)], by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "主辦證券商", "IPOFail", "UnderWritingPercentage")]
+
+
+# 顯示出 UnderwriterReputation 所有結果，並以滾動捲軸呈現
+UnderwriterReputation %>%
+  mutate(`公司簡稱` = ifelse(IPOFail == 1,
+                  cell_spec(`公司簡稱`, "html", color = "red", bold = T),
+                  cell_spec(`公司簡稱`, "html", color = "green", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# data to join 
+UnderwriterReputation_ToJoin <- UnderwriterReputation %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "UnderWritingPercentage")]
+
+GetSummaryGroupByIPOFailAndTotal(UnderwriterReputation, "UnderWritingPercentage") %>% 
+  kable(., caption = "以IPO失敗與否區分之承銷商聲譽", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+
+## 3. IPO前12個月市場累積持有報酬
+
+* 利用自製Function **GetMarketReturnForEachFirm** 計算 **每一間公司IPO前一年市場累積報酬**。
+
+* Market_CR * 100 才會是累積報酬趴數。
+
+* 最終Data為 **MarketReturnPriorOneYearTOJoin** 將以 **公司簡稱** 為key合併到最終Data中。
+
+* 以IPO Fail or not 去區分的結果來看，IPO 失敗的公司相對來說會有比較 **低的** IPO前12個月市場累積持有報酬。(7.76 % v.s. 5.36 %)
+
+```{r echo = TRUE}
+FirmDataForMR <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "Market")]
+
+MarketReturn <- MarketReturn_Data %>% 
+  .[, .SD, .SDcols = -c("收盤價")] %>% 
+   dcast(., `年月日` ~ `證券代碼`, value.var = "報酬率")
+
+GetMarketReturnForEachFirm <- function(FirmSign){
+  Market <- FirmDataForMR %>% 
+  .[公司簡稱 == FirmSign] %>% 
+  pull(Market)
+  
+  IPODate <- FirmDataForMR %>% 
+    .[公司簡稱 == FirmSign] %>% 
+    pull(`上市櫃日期`)
+  
+  Data <- MarketReturn %>% 
+    .[(which(MarketReturn$年月日 == IPODate) - 365) : (which(年月日 == IPODate) - 1)] %>% 
+    .[, .SD, .SDcols = -c(ifelse(Market == "OTC", 3, 2))] %>% 
+    .[, `年月日` := as.Date(ymd(`年月日`))] %>% 
+    as.data.frame()
+  
+  xts_Data <- xts(Data[, -1], Data[, 1])
+  
+  Market_CR <- xts_Data %>% 
+    Return.cumulative() %>% 
+    as.numeric()
+  
+  return(Market_CR)
+}
+
+# GetMarketReturnForEachFirm("1338 廣華-KY")
+
+Market_CR <- map_dbl(FirmDataForMR$公司簡稱, function(x){GetMarketReturnForEachFirm(x)})
+
+MarketReturnPriorOneYear <- FirmDataForMR %>% 
+  .[, Market_CR := round(Market_CR, 3)] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "Market_CR")]
+
+MarketReturnPriorOneYearTOJoin <- MarketReturnPriorOneYear %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "Market_CR")]
+
+# 顯示出MarketReturnPriorOneYear所有結果，並以滾動捲軸呈現
+MarketReturnPriorOneYear %>%
+  mutate(Market_CR = ifelse(Market_CR > 0,
+                  cell_spec(Market_CR, "html", color = "red", bold = T),
+                  cell_spec(Market_CR, "html", color = "green", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 製作"Positive", "Negative"的表格
+MCR_DataToSummary <- MarketReturnPriorOneYear %>% 
+  .[, Sign := ifelse(Market_CR > 0, "Positive", "Negative")] 
+
+MarketCR <- MCR_DataToSummary %>% 
+  pull(Sign) %>% 
+  table() %>% 
+  as.data.table() %>% 
+  dplyr::rename("Sign" = ".") 
+
+# 計算累積報酬平均
+MarketCR_Summary <- MCR_DataToSummary %>% 
+  .[, mean(Market_CR), by = "Sign"] %>% 
+  left_join(., MarketCR, by = "Sign") %>% 
+  setDT() %>% 
+  .[, MeanReturn := round(V1*100, 3) %>% str_c(., "%")] %>% 
+  .[, .SD, .SDcols = -c("V1")]
+
+kable(MarketCR_Summary, caption = "Summary 市場報酬", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+# 以是否失敗為群組計算失敗與否與市場報酬間的關係
+MarketReturnAndFail <- MCR_DataToSummary %>% 
+  left_join(., FailData_ToJoin, by = "公司簡稱") %>% 
+  setDT()
+
+Summary_MarketReturnAndFail <- MarketReturnAndFail %>% 
+  .[, mean(Market_CR), by = "IPOFail"] %>% 
+  .[, Market_CR := round(V1*100, 3) %>% str_c(., "%")] %>% 
+  .[, .SD, .SDcols = -c("V1")]
+
+kable(Summary_MarketReturnAndFail, 
+      caption = "以IPO失敗與否區分之市場平均報酬", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+## 4. IPO前1個月其他IPO首或期初報酬
+
+* 以join的方式將IPO Date 與 IPOPriorOneMonth 進行配對，最後利用 公司簡稱 做key 進行群組並計算平均。
+
+* **4109 加捷生醫 6185 幃翔 6188 廣明** 此三家公司皆在2002/08上市櫃，但由於2002/08以前已無上市櫃公司列入樣本中，故無法計算其 OtherFirst or Initial Return。
+
+* 最終Data為 **FirstAndIntialFinalToJoin** 將以 **公司簡稱** 為key合併到最終Data中。
+
+* 從Summary的結果來看，IPO失敗的公司平均來說會有比較 **低的** 其他IPO首或期初報酬。
+
+```{r echo = TRUE}
+# 計算每一家公司的首日報酬與期初報酬
+FirmDataForFirstAndInitialReturn <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "Market")]
+
+# 這些月份並沒有IPO公司 因此需要再往前一個月去抓IPO
+PriorTwoMonth <- c("2010-09-01", "2012-09-01", "2007-04-01", "2014-07-01",
+                   "2013-08-01")
+PriorThreeMonth <- c("2008-09-01")
+
+FirstAndInitialReturnForEachFirm <- IPO_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "承銷時上市日期", "承銷價格(元)", "上市日收盤價(元)",
+                       "上市日後一天收盤價(元)", "上市日後二天收盤價(元)",
+                       "上市日後三天收盤價(元)", "上市日後四天收盤價(元)")] %>% 
+  .[, `:=` (FirstDayReturn = `上市日收盤價(元)` / `承銷價格(元)` - 1, 
+            Day1Return = `上市日後一天收盤價(元)` / `上市日收盤價(元)` - 1,
+            Day2Return = `上市日後二天收盤價(元)` / `上市日後一天收盤價(元)` - 1,
+            Day3Return = `上市日後三天收盤價(元)` / `上市日後二天收盤價(元)` - 1,
+            Day4Return = `上市日後四天收盤價(元)` /  `上市日後三天收盤價(元)` - 1)] %>% 
+  .[, InitialReturn := (( 1 + FirstDayReturn) * ( 1 + Day1Return) * ( 1 + Day2Return) * 
+                          ( 1 + Day3Return) * ( 1 + Day4Return) - 1 )] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "承銷時上市日期", "FirstDayReturn", "InitialReturn")] %>%
+  .[, IPODate := as.Date(`承銷時上市日期`) %>% format(., '%Y-%m-01')] %>% 
+  .[, IPOPriorOneMonth := (as.Date(IPODate) - 30) %>% format(., '%Y-%m-01')] %>% 
+  .[, IPOPriorOneMonth := ifelse(as.Date(IPODate) %in% as.Date(PriorTwoMonth),
+                                 (as.Date(IPOPriorOneMonth) - 30) %>% format(., '%Y-%m-01'),
+                                 IPOPriorOneMonth)] %>% 
+  .[, IPOPriorOneMonth := ifelse(as.Date(IPODate) %in% as.Date(PriorThreeMonth),
+                                 (as.Date(IPOPriorOneMonth) - 60) %>% format(., '%Y-%m-01'),
+                                 IPOPriorOneMonth)]
+
+FirstAndIntialToJoin <- FirstAndInitialReturnForEachFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPODate", "FirstDayReturn", "InitialReturn")] %>% 
+  dplyr::rename("IPOPriorOneMonth" = "IPODate") 
+
+FirstAndIntialAfterJoin <- FirstAndInitialReturnForEachFirm %>% 
+  left_join(., FirstAndIntialToJoin, by = "IPOPriorOneMonth") %>% 
+  setDT() #%>% 
+  #.[is.na(FirstDayReturn.y) == T]
+
+#unique(FirstAndIntialAfterJoin$IPODate)
+
+FirstAndIntialFinal <- FirstAndIntialAfterJoin%>% 
+  .[, .SD, .SDcols = c("公司簡稱.x", "承銷時上市日期", "FirstDayReturn.y", "InitialReturn.y")] %>% 
+  .[, `:=` (FirstDayReturn.y = mean(FirstDayReturn.y),
+            InitialReturn.y = mean(InitialReturn.y)), 
+    by = "公司簡稱.x"] %>% 
+  .[, head(.SD, 1), by = "公司簡稱.x"]
+
+colnames(FirstAndIntialFinal) <- c("公司簡稱", "承銷時上市日期", "OtherIPOFirstDayReturn", "OtherIPOInitialReturn")
+
+FirstAndIntialFinalToJoin <- FirstAndIntialFinal %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "OtherIPOFirstDayReturn", "OtherIPOInitialReturn")]
+
+# 顯示出MarketReturnPriorOneYear所有結果，並以滾動捲軸呈現
+FirstAndIntialFinal %>%
+  mutate(OtherIPOFirstDayReturn = ifelse(OtherIPOFirstDayReturn > 0,
+                  cell_spec(OtherIPOFirstDayReturn, "html", color = "red", bold = T),
+                  cell_spec(OtherIPOFirstDayReturn, "html", color = "green", italic = T)),
+         OtherIPOInitialReturn = ifelse(OtherIPOInitialReturn > 0,
+                  cell_spec(OtherIPOInitialReturn, "html", color = "red", bold = T),
+                  cell_spec(OtherIPOInitialReturn, "html", color = "green", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+WithoutFirstAndIntialFinalData <- FirstAndIntialFinal %>% 
+  .[is.na(OtherIPOFirstDayReturn) == T] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "承銷時上市日期")]
+
+kable(WithoutFirstAndIntialFinalData, 
+      caption = "沒有OtherIPOFirstAndIntialReturn 資料", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+# 製作"Positive", "Negative"的表格
+FirstAndIntialFinalToSummary <- FirstAndIntialFinal %>% 
+  .[, `:=` (OtherIPOFirstDayReturnSign = ifelse(OtherIPOFirstDayReturn > 0, 
+                                                "Positive", 
+                                                "Negative"),
+            OtherIPOInitialDayReturnSign = ifelse(OtherIPOInitialReturn > 0, 
+                                                "Positive", 
+                                                "Negative"))] 
+
+FirstReturnTable <- FirstAndIntialFinalToSummary %>%
+  pull(OtherIPOFirstDayReturnSign) %>%
+  table() %>%
+  as.data.table() %>% 
+  dplyr::rename("OtherIPOFirstDayReturnSign" = ".")
+
+InitialReturnTable <- FirstAndIntialFinalToSummary %>%
+  pull(OtherIPOInitialDayReturnSign) %>%
+  table() %>%
+  as.data.table() %>% 
+  dplyr::rename("OtherIPOInitialDayReturnSign" = ".")
+
+# 計算其他ＩＰＯ首日與期初平均報酬
+FirstReturn_Summary <- FirstAndIntialFinalToSummary %>%
+  .[, mean(OtherIPOFirstDayReturn, na.rm = T), 
+    by = "OtherIPOFirstDayReturnSign"] %>%
+  .[!(is.na(OtherIPOFirstDayReturnSign) == T)] %>% 
+  left_join(., FirstReturnTable, by = "OtherIPOFirstDayReturnSign") %>% 
+  setDT() %>% 
+  .[, MeanOtherIPOFirstDayReturn := round(V1*100, 3) %>% str_c(., "%")] %>%
+  .[, .SD, .SDcols = -c("V1")]
+
+InitialReturn_Summary <- FirstAndIntialFinalToSummary %>%
+  .[, mean(OtherIPOInitialReturn, na.rm = T), 
+    by = "OtherIPOInitialDayReturnSign"] %>%
+  .[!(is.na(OtherIPOInitialDayReturnSign) == T)] %>% 
+  left_join(., InitialReturnTable, by = "OtherIPOInitialDayReturnSign") %>% 
+  setDT() %>% 
+  .[, MeanOtherIPOInitialDayReturn := round(V1*100, 3) %>% str_c(., "%")] %>%
+  .[, .SD, .SDcols = -c("V1")]
+
+kable(FirstReturn_Summary, caption = "Summy 其他IPO首日報酬", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+kable(InitialReturn_Summary, caption = "Summy 其他IPO期初報酬", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+# 計算IPO失敗與否跟First and Initial Return 的差異
+FirstAndIntialAndFail <- FirstAndIntialFinal %>% 
+  left_join(., FailData_ToJoin, by = "公司簡稱") %>% 
+  setDT()
+
+Summary_FirstAndIntialAndFail <- FirstAndIntialAndFail %>% 
+  .[, .SD, .SDcols = c("IPOFail", "OtherIPOFirstDayReturn", "OtherIPOInitialReturn")] %>%
+  .[, IPOFail := as.character(IPOFail)] %>% 
+  .[, `:=` (OtherIPOFirstDayReturn = mean(OtherIPOFirstDayReturn, na.rm = T),
+            OtherIPOInitialReturn = mean(OtherIPOInitialReturn, na.rm = T)), 
+    by = "IPOFail"] %>% 
+  .[, head(.SD, 1), by = "IPOFail"] %>% 
+  .[, `:=` (OtherIPOFirstDayReturn = round(OtherIPOFirstDayReturn* 100, 3) %>% str_c(., "%"),
+            OtherIPOInitialReturn = round(OtherIPOInitialReturn* 100, 3) %>% str_c(., "%"))]
+
+kable(Summary_FirstAndIntialAndFail, 
+      caption = "以IPO失敗與否區分之首日或初期平均報酬", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+## 5. Price Revision
+
+* 利用 **圈購價下限、圈購價上限** 計算圈購價格中點，再利用 **承銷價格(元)** 直接計算PriceRevision，觀察公司是否有修正其承銷價格。
+
+* 最後利用 **PriceRevisionToJoin** 匯入最終的data中。
+
+* 分析結果發現共有194家公司無法計算Price Revision 因此考慮將此變數刪除。
+
+* 以IPO Fail區分Price Revision 狀態來說也沒有太大區別。
+
+```{r echo = TRUE}
+PriceRevision <- IPO_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "承銷價格(元)", "圈購價下限", "圈購價上限")] %>%
+  .[, PriceRangeMidPoint := (`圈購價下限` + `圈購價上限`)/2] %>% 
+  .[, PriceRevision := round(((`承銷價格(元)` / PriceRangeMidPoint) -1)*100, 2)] %>% 
+  .[, PriceRevision := ifelse(PriceRevision == "Inf", NA, PriceRevision)] %>% 
+  .[, Revision := case_when(
+    PriceRevision == 0 ~ "未修正",
+    PriceRevision > 0 ~ "向上修正", 
+    PriceRevision < 0 ~ "向下修正",
+    TRUE ~ "NA")]
+
+# 最終data 
+PriceRevisionToJoin <- PriceRevision %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "PriceRevision")]
+
+# 各price revision sign 數量比較
+PriceRevision %>% 
+  pull(Revision) %>% 
+  table() %>% 
+  as.data.frame() %>% 
+  dplyr::rename("Sign" = ".") %>% 
+  kable(., caption = "Price Revision Sign", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+# "以IPO是否失敗計算承銷價修正情形"
+PriceRevision %>% 
+  left_join(., FailData_ToJoin, by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, count(`Revision`), by = "IPOFail"] %>% 
+  .[, Percent := round((`freq` / sum(freq))*100, 0) %>% str_c(., "%"), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Price Revision Sign" = "x") %>% 
+  kable(., caption = "以IPO是否失敗計算承銷價修正情形", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```
+
+## 6. Market Heat Degree 
+
+* 計算IPO當下的 **過去四季總IPO數量**，作為 Market Heat Degree 的代理變數。
+
+* 以 **IPOHeatDegree_func** 自由調整跟過去多少季比較，並在最後計算出結果 **IPOHeatDegreeToJoin**。
+
+* 輸出之data 為 **IPOHeatDegreeToJoin** 用以合併入最終data中。
+
+* 以IPO Fail與否區分發現，平均來說IPO失敗會有比較高的IPO Heat Degree。
+
+```{r echo = TRUE}
+
+## 先重新製作IPO List data 因為若是以原本list firm資料去做，會導致有很多公司抓不到IPO heat degree資料（因為ListFirm資料中，2002/1~2002/7是沒有IPO公司的）
+FirmList_Data <- read_xlsx("Data/FirmList1123.xlsx") %>% as.data.table()
+ListFirmInTWSE <- read_xlsx("Data/ListFirmInTWSE.xlsx") %>% as.data.table()
+
+SpecialIPOCause <- c("櫃轉市", "合庫(5854)於當日下市，轉金控上市", 
+                     "神達電腦(2315)於當日下市，轉投控上市", "轉金融控股",
+                     "轉換股份", "股份轉換", "合勤(2391)下市，合勤控(3704)上市",
+                     "大陸工程(2526)於當日下市，轉投控上市")  
+OTCToTSE <- ListFirmInTWSE %>% 
+  .[`備註` %in% SpecialIPOCause] %>% 
+  pull(`公司代號`)
+
+FirmListInTSE <- FirmList_Data %>% 
+  setDT() %>% 
+  .[year(`首次TSE上市日`) >= 2000 & year(`首次TSE上市日`) <= 2014 ] %>% 
+  .[!(str_sub(`公司簡稱`, 1, 4) %in% OTCToTSE)] %>% 
+  .[!(`TSE新產業名` %in% c("M2800 金融業"))] %>% 
+  .[, Market := "TSE"] %>% 
+  setnames(., "首次TSE上市日", "上市櫃日期") %>%
+  .[, SurvivalYears := round((`下市日期` - `上市櫃日期`)/365, 2)] %>% 
+  .[, Delist := ifelse((is.na(`下市日期`) == F & SurvivalYears <= 6), 1, 0)] %>%
+  .[, FCD := (ifelse(is.na(`全額交割起日(二)` == T), 
+                     `全額交割起日(一)`, `全額交割起日(二)`)/86400) %>% 
+      as.Date() %>% as.POSIXct()] %>%
+  .[, .SD, .SDcols = c("公司簡稱" , "TSE新產業名", "會計師事務所", "設立日期", 
+                       "上市櫃日期", "首次REG上市日", "下市日期", "FCD", "Delist", 
+                       "Market", "SurvivalYears")]
+
+OTCToTSEButStillInOTC <- FirmList_Data %>% 
+  .[str_sub(`公司簡稱`, 1, 4) %in% OTCToTSE] %>% 
+  .[year(`首次OTC上市日`) >= 2000 & year(`首次OTC上市日`) <= 2014 ]
+
+FirmListInOTC <- FirmList_Data %>%
+  setDT() %>% 
+  .[year(`首次OTC上市日`) >= 2000 & year(`首次OTC上市日`) <= 2014 ] %>% 
+  .[!(`公司簡稱` %in% FirmListInTSE$公司簡稱)] %>% 
+  .[!(`TSE新產業名` %in% c("M2800 金融業"))] %>% 
+  .[, Market := "OTC"] %>% 
+  setnames(., "首次OTC上市日", "上市櫃日期") %>%
+  .[, SurvivalYears := round((`下市日期` - `上市櫃日期`)/365, 2)] %>% 
+  .[, Delist := ifelse((is.na(`下市日期`) == F & SurvivalYears <= 6), 1, 0)] %>%
+  .[, FCD := (ifelse(is.na(`全額交割起日(二)` == T), 
+                     `全額交割起日(一)`, `全額交割起日(二)`)/86400) %>% 
+      as.Date() %>% as.POSIXct()] %>%
+  .[, .SD, .SDcols = c("公司簡稱" , "TSE新產業名", "會計師事務所", "設立日期", 
+                       "上市櫃日期", "首次REG上市日", "下市日期", "FCD", "Delist", 
+                       "Market", "SurvivalYears")]
+
+ElectiricIndustry <- c("M2324 半導體", "M2328 電子零組件", "M2326 光電業", 
+                       "M2325 電腦及週邊", "M2327 通信網路業", "M2329 電子通路業",
+                       "M2330 資訊服務業", "M2331 其他電子業")
+
+ListFirmForIPOHeat <- rbind(FirmListInTSE, FirmListInOTC) %>% 
+  .[order(`公司簡稱`)] %>% 
+  .[, ElectricOrNot := ifelse(`TSE新產業名` %in% ElectiricIndustry, 1, 0)] %>%
+  .[, FCDInFiveYear := ifelse(((FCD - 上市櫃日期)/365 > 6 | is.na(FCD) == T), 
+                               0, 1)] %>% 
+  .[, IPOFail := ifelse((Delist == 0 & FCDInFiveYear == 0), 0, 1)] %>% 
+  .[, FirmAgeBeforeIPO := round((`上市櫃日期` - `設立日期`)/365, 3)] %>% 
+  .[, IPOFailDate := case_when(is.na(FCD) == T ~ `下市日期`,
+                               TRUE ~ FCD)] %>% 
+  .[, `TSE新產業名` := case_when(
+    `公司簡稱` == "3079 宏億國" ~ "M2324 半導體", 
+    `公司簡稱` == "3142 遠茂" ~ "M2326 光電業",
+    `公司簡稱` == "3214 元砷" ~ "M2326 光電業", 
+    `公司簡稱` == "4910 陽慶" ~ "M2328 電子零組件",
+    `公司簡稱` == "6193 洪氏英" ~ "M2328 電子零組件",
+    `公司簡稱` == "6232 仕欽" ~ "M2328 電子零組件",
+    `公司簡稱` == "6262 鼎太國際" ~ "M2330 資訊服務業",
+    `公司簡稱` == "8017 展茂" ~ "M2326 光電業",
+    TRUE ~ `TSE新產業名`
+  )]
+
+# 開始用function去計算IPO heat degree
+IPOHeatDegree_func <- function(PriviousXQuarter){
+
+IPOHeatDegreeData <- ListFirmForIPOHeat %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")] %>% 
+  .[, Quarter := lubridate::quarter(`上市櫃日期`, with_year = T)] %>% 
+  .[order(Quarter)] %>% 
+  .[, count(`Quarter`)] %>% 
+  setDT()
+
+CaculateIPOHeatDegree <- IPOHeatDegreeData %>% 
+  .[, IPOHeatDegree := Reduce(`+`, shift(freq, 1:PriviousXQuarter))] %>% 
+  .[, .SD, .SDcols = -c("freq")] %>% 
+  dplyr::rename("Quarter" = "x")
+
+IPOHeatDegree <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")] %>% 
+  .[, Quarter := lubridate::quarter(`上市櫃日期`, with_year = T)] %>% 
+  left_join(., CaculateIPOHeatDegree, by = "Quarter") %>% 
+  setDT()
+
+return(IPOHeatDegree)
+}
+
+# 計算IPO前四季市場總IPO數量。
+IPOHeatDegreeToJoin <- IPOHeatDegree_func(4) %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPOHeatDegree")]
+
+IPOHeatDegreeToSummary <- IPOHeatDegree_func(4) %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "Quarter", "IPOFail", "IPOHeatDegree")]
+
+# 計算IPO Heat Degree 平均數及中位數 等summary 另外也有以IPOFail與否做區分
+IPOHeatDegree_Summary <- GetSummaryGroupByIPOFailAndTotal(IPOHeatDegreeToSummary,
+                                                          "IPOHeatDegree")
+
+kable(IPOHeatDegree_Summary, caption = "IPOHeatDegree_Summary") %>% 
+  kable_styling(., full_width = T)
+
+# 顯示出 IPOHeatDegree 所有結果，並以滾動捲軸呈現
+IPOHeatDegreeToSummary %>%
+  mutate(IPOHeatDegree = ifelse(IPOHeatDegree > mean(IPOHeatDegree, na.rm = T),
+                  cell_spec(IPOHeatDegree, "html", color = "red", bold = T),
+                  cell_spec(IPOHeatDegree, "html", color = "green", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+```
+
+## 7. Market Value On IPO Day 
+
+* IPO首日交易日結束後的股票市值
+
+* **MarketValueOnIPODayTOFinalData**為後續要匯入最終data中之資料。
+
+* 不論是以Mean 還是 Median 來說，IPO No Fail 皆俱有比較大的數值。
+
+```{r echo = TRUE}
+MarketValueOnIPODay <- IPO_Data %>% 
+  left_join(., ListFirm %>% .[, .SD, .SDcols = c("公司簡稱", "Market", "IPOFail")], 
+            by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, LogMarketValueOnIPODay := log(`上市日市值(百萬元)`*1000000)] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "承銷時上市日期", "Market", 
+                       "IPOFail", "LogMarketValueOnIPODay")]
+
+MarketValueOnIPODayTOFinalData <- MarketValueOnIPODay %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "LogMarketValueOnIPODay")]
+
+MarketValue_Summary <- GetSummaryGroupByIPOFailAndTotal(MarketValueOnIPODay,
+                                         "LogMarketValueOnIPODay")
+
+kable(MarketValue_Summary, caption = "MarketValue_Summary") %>% 
+  kable_styling(., full_width = T)
+
+# 顯示出 MarketValue 所有結果，並以滾動捲軸呈現
+MarketValueOnIPODay %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "700px", height = "300px")
+
+```
+
+## 8. Big4Natl
+
+* Big4Natl (前四大會計公司 Dummy)
+
+* 四大會計公司分別為：**資誠聯合會計師事務所(PwC)**、**勤業眾信聯合會計師事務所(Deloitte)**、**安永聯合會計師事務所(EY)**、**安侯建業聯合會計師事務所(KPMG)**
+
+* 建立 **AccountingFirmToJoin** 用以合併入最終data中。
+
+* 就 **Summary_AccountingFirm** 的結果可以發現，IPOFail的群組有較多的比例為非四大會計師事務所。
+
+```{r echo = TRUE, message=FALSE}
+Big4Natl <- c("資誠聯合會計師事務所", "勤業眾信聯合會計師事務所", 
+              "安永聯合會計師事務所", "安侯建業聯合會計師事務所")
+
+AccountingFirm_Data <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPOFail", "會計師事務所")] %>% 
+  .[, Big4Natl := ifelse(`會計師事務所` %in% Big4Natl, 1, 0)]
+
+# 顯示出 AccountingFirm_Data 所有結果，並以滾動捲軸呈現
+AccountingFirm_Data %>%
+  mutate(Big4Natl = ifelse(Big4Natl == 0 ,
+                  cell_spec(Big4Natl, "html", color = "red", bold = T),
+                  cell_spec(Big4Natl, "html", color = "green", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# Data to join 
+AccountingFirmToJoin <- AccountingFirm_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "Big4Natl")]
+
+# 建立summary的結果
+Summary_AccountingFirm <- AccountingFirm_Data %>% 
+  dcast(., IPOFail ~ Big4Natl, length) %>% 
+  setnames(., 2:3, new = c("NotBig4Natl", "Big4Natl")) %>% 
+  .[, `:=` (`NotBig4Natl_per(%)` = 
+                round((NotBig4Natl/ (NotBig4Natl + Big4Natl))*100, 2),
+             `Big4Natl_per(%)` = 
+                round((Big4Natl / (NotBig4Natl + Big4Natl))*100, 2))]
+
+Summary_AccountingFirm %>% 
+  kable(., caption = "AccountingFirm_Summary") %>% 
+  kable_styling(., full_width = T)
+  
+  
+  
+  
+
+```
+
+
+## 9. NumIPO 
+
+* IPO若大於前四季的數量平均50%以上，則為熱季
+
+* 為了能計算2002.3~2003.4的NumIPO，需要列出2001年的上市公司數量，以便計算。故建立 **ListFirm_2001** 最後合併入ListFirm中。
+
+* 將 NumIPOSign 以數值表示，hot season = 3, median = 2, cold season = 1
+
+* 最後整理出 **NumIPOToJoin**，用於合併入最終data中。
+
+* 以IPO Fail or not 建立summary來看，IPO失敗的公司相對來說有比較低的hot season，但差距並不大。
+
+```{r 建立2001的IPO公司清單 ,echo = TRUE}
+## Get the number of IPO in 2001~2002, this is the data i need when i calculate the NUMIPO in 2002.
+FirmList_Data <- read_xlsx("Data/FirmList1123.xlsx") %>% as.data.table()
+ListFirmInTWSE <- read_xlsx("Data/ListFirmInTWSE.xlsx") %>% as.data.table()
+ListFirmInTWSE_2001 <- read_xlsx("Data/ListFirmInTWSE_2001.xlsx") %>% as.data.table()
+ListFirmInTWSE <- ListFirmInTWSE %>% 
+  rbind(., ListFirmInTWSE_2001)
+StopTrading_Data <- read_xlsx("Data/StopTrading_Data.xlsx") %>% 
+  dplyr::rename("公司簡稱" = "証券代碼") %>% 
+  as.data.table()
+
+SpecialIPOCause <- c("櫃轉市", "合庫(5854)於當日下市，轉金控上市", 
+                     "神達電腦(2315)於當日下市，轉投控上市", "轉金融控股",
+                     "轉換股份", "股份轉換", "合勤(2391)下市，合勤控(3704)上市",
+                     "大陸工程(2526)於當日下市，轉投控上市")  
+OTCToTSE <- ListFirmInTWSE %>% 
+  .[`備註` %in% SpecialIPOCause] %>% 
+  pull(`公司代號`)
+
+FirmListInTSE_2001 <- FirmList_Data %>% 
+  full_join(., StopTrading_Data, by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[year(`首次TSE上市日`) >= 2001 & year(`首次TSE上市日`) < 2002 ] %>% 
+  .[!(str_sub(`公司簡稱`, 1, 4) %in% OTCToTSE)] %>% 
+  .[!(`TSE新產業名` %in% c("M2800 金融業"))] %>%
+  .[, Market := "TSE"] %>% 
+  dplyr::rename("上市櫃日期" = "首次TSE上市日") %>% 
+  data.table(., key = c("公司簡稱", "暫停交易起日")) %>% 
+  .[unique(.[,list(`公司簡稱`)]), mult= 'last'] %>% 
+  .[, SurvivalYears := round((`下市日期` - `上市櫃日期`)/365, 2)] %>% 
+  .[, Delist := ifelse((is.na(`下市日期`) == F & SurvivalYears <= 6), 1, 0)] %>%
+  .[, FCD := (ifelse(is.na(`全額交割起日(二)` == T), 
+                          `全額交割起日(一)`, `全額交割起日(二)`)/86400) %>% 
+              as.Date() %>% as.POSIXct()] %>%
+  #.[!(`暫停交易原因` %in% c("併入控股公司下市", "合併下市"))] %>% # 有19間為併購下市
+  .[, .SD, .SDcols = c("公司簡稱" , "TSE新產業名", "會計師事務所", "設立日期", "上市櫃日期", 
+                       "首次REG上市日", "下市日期", "FCD", "Delist", 
+                       "Market", "SurvivalYears")]
+
+FirmListInOTC_2001 <- FirmList_Data %>% 
+    full_join(., StopTrading_Data, by = "公司簡稱") %>% 
+    setDT() %>% 
+    .[year(`首次OTC上市日`) >= 2001 & year(`首次OTC上市日`) < 2002 ] %>% 
+    .[!(`公司簡稱` %in% FirmListInTSE_2001$公司簡稱)] %>% 
+    .[!(`TSE新產業名` %in% c("M2800 金融業"))] %>% 
+    .[, Market := "OTC"] %>% 
+    dplyr::rename("上市櫃日期" = "首次OTC上市日") %>%
+    data.table(., key = c("公司簡稱", "暫停交易起日")) %>% 
+    .[unique(.[,list(`公司簡稱`)]), mult= 'last'] %>% 
+    .[, SurvivalYears := round((`下市日期` - `上市櫃日期`)/365, 2)] %>% 
+    .[, Delist := ifelse((is.na(`下市日期`) == F & SurvivalYears <= 6), 1, 0)] %>%
+    .[, FCD := (ifelse(is.na(`全額交割起日(二)` == T), 
+                      `全額交割起日(一)`, `全額交割起日(二)`)/86400) %>% 
+                as.Date() %>% as.POSIXct()] %>%
+    #.[!(`暫停交易原因` %in% c("併入控股公司下市", "合併下市"))] %>% # 有18間為併購下市
+    .[, .SD, .SDcols = c("公司簡稱" , "TSE新產業名", "會計師事務所", "設立日期", 
+                         "上市櫃日期", "首次REG上市日", "下市日期", "FCD", "Delist", 
+                         "Market", "SurvivalYears")]
+
+ElectiricIndustry <- c("M2324 半導體", "M2328 電子零組件", "M2326 光電業", 
+                       "M2325 電腦及週邊", "M2327 通信網路業", "M2329 電子通路業",
+                       "M2330 資訊服務業", "M2331 其他電子業")
+
+ListFirm_2001 <- rbind(FirmListInTSE_2001, FirmListInOTC_2001) %>% 
+  .[order(`公司簡稱`)] %>% 
+  .[, ElectricOrNot := ifelse(`TSE新產業名` %in% ElectiricIndustry, 1, 0)] %>%
+  .[, FCDInFiveYear := ifelse(((FCD - 上市櫃日期)/365 > 6 | is.na(FCD) == T), 
+                               0, 1)] %>% 
+  .[, IPOFail := ifelse((Delist == 0 & FCDInFiveYear == 0), 0, 1)] %>% 
+  .[, FirmAgeBeforeIPO := round((`上市櫃日期` - `設立日期`)/365, 3)] %>% 
+  .[, IPOFailDate := case_when(is.na(FCD) == T ~ `下市日期`,
+                               TRUE ~ FCD)] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")]
+
+# write.csv(ListFirm_2001, file = "ListFirm_2001.csv")
+```
+
+```{r echo = TRUE, fig.width = 10, fig.asp = 0.62, warning = FALSE, message=FALSE}
+ListFirm2001_2014 <- ListFirm %>%
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")] %>% 
+  rbind(., ListFirm_2001)
+
+IPOHeatDegreeData <- ListFirm2001_2014 %>% 
+  .[, Quarter := lubridate::quarter(`上市櫃日期`, with_year = T)] %>% 
+  .[order(Quarter)] %>% 
+  .[, count(`Quarter`)] %>%
+  dplyr::rename("Quarter" = "x") %>% 
+  setDT()
+
+CalculateNumIPO <- IPOHeatDegreeData %>%
+  .[, MeanIPONum := Reduce(`+`, shift(freq, 1:4)) / 4] %>%
+  .[, NumIPOSign := case_when(
+    freq >= (MeanIPONum + MeanIPONum / 2) ~ "Hot Season",
+    freq <= (MeanIPONum - MeanIPONum / 2) ~ "Cold Season",
+    TRUE ~ "Median")] %>% 
+  .[-c(1:4)] %>% 
+  .[, Quarter := as.character(Quarter)]
+
+# 畫圖顯示每季IPO數量
+IPOHeatDegreeData %>% 
+  .[, Quarter := as.character(Quarter) %>% str_sub(., 3, 6)] %>% 
+  ggplot(., aes(x = Quarter, y = freq)) +
+  geom_bar(aes(x = Quarter, y = freq), stat = "identity", fill = "#CD5C5C")+
+  geom_label(aes(x = Quarter, y = freq, label = freq)) +
+  ggtitle("每季上市櫃數量")+
+  ylab("Count")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+# 顯示出 CalculateNumIPO 所有結果，並以滾動捲軸呈現
+CalculateNumIPO %>%
+  mutate(NumIPOSign = case_when(
+    NumIPOSign == "Hot Season" ~ cell_spec(NumIPOSign, "html", color = "red", bold = T),
+    NumIPOSign == "Cold Season" ~ cell_spec(NumIPOSign, "html", color = "blue", bold = T),
+    TRUE ~ cell_spec(NumIPOSign, "html", color = "green", bold = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 做出冷熱季數量分配表
+NumIPO_Table <- CalculateNumIPO %>% 
+  pull(NumIPOSign) %>% 
+  table() %>% 
+  as.data.table() %>% 
+  dplyr::rename("NumIPOSign" = ".") 
+
+kable(NumIPO_Table, caption = "冷熱季數量分配表", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+# 將NumIPO的資料匯入ListFirm中
+NumIPO <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")] %>% 
+  .[, Quarter := lubridate::quarter(`上市櫃日期`, with_year = T) %>% as.character()] %>% 
+  left_join(., CalculateNumIPO %>% 
+              .[, .SD, .SDcols = c("Quarter", "NumIPOSign")], by = "Quarter") %>% 
+  setDT()
+
+# 將 NumIPOSign 以數值表示，hot season = 3, median = 2, cold season = 1
+NumIPOToJoin <- NumIPO %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "NumIPOSign")] %>% 
+  .[, NumIPOSign := case_when(
+    NumIPOSign == "Hot Season" ~ 3,
+    NumIPOSign == "Median" ~ 2,
+    NumIPOSign == "Cold Season" ~ 1
+  )]
+
+Summary_NumIPO <- NumIPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NumIPOSign")] %>%
+  .[, table(NumIPOSign), by = "IPOFail"] %>% 
+  .[, NumIPOSign := c("Cold Season", "Hot Season", "Median", 
+                      "Cold Season", "Hot Season", "Median")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0) %>% str_c(., "%"), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NumIPOSign", "Num", "Percent")]
+
+# kable(Summary_NumIPO, caption = "冷熱季數量分配表_IPO Fail or Not", align = "l") %>% 
+#   kable_styling(full_width = TRUE)
+
+Summary_NumIPO_ToPlot <- NumIPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NumIPOSign")] %>%
+  .[, table(NumIPOSign), by = "IPOFail"] %>% 
+  .[, NumIPOSign := c("Cold Season", "Hot Season", "Median", 
+                      "Cold Season", "Hot Season", "Median")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NumIPOSign", "Num", "Percent")]
+
+# 畫圖顯示 NumIPO
+Summary_NumIPO_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = NumIPOSign, y = Percent)) +
+  geom_bar(aes(x = NumIPOSign, y = Percent, fill = IPOFail), 
+           stat = "identity", position = "dodge") +
+  geom_label(aes(x = NumIPOSign, y = Percent, label = Percent)) +
+  ggtitle("以IPO失敗與否區分NumIPO")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+```
+
+## 10. EWU 
+
+* 以當季平均的Underpricing嚴重程度作為是否為發行熱季的判斷準則, 與前四季做比較
+
+* 利用 UnderPricing 來做為冷熱記得判斷標準。
+
+* 將 EWUSign 以數值表示，hot season = 3, median = 2, cold season = 1
+
+* 最終建立 **EWUToJoin** 用於合併進入最終的data中。
+
+* 根據 **Summary_EWU** 區分IPO_Fail的結果可以發現，IPO失敗的群組相對來說有比較高一點的Cold Season，與Summary_NumIPO的結果吻合。
+
+```{r echo = TRUE}
+IPO_Data_2001 <- read_xlsx("Data/IPO_Data_2001.xlsx") %>% 
+  dplyr::rename("公司簡稱" = "公司") %>% 
+  setDT()
+
+IPODataToEWU <- IPO_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市日收盤價(元)", "承銷價格(元)")] %>% 
+  rbind(., IPO_Data_2001 %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "上市日收盤價(元)", "承銷價格(元)")]) %>%
+  left_join(., ListFirm2001_2014 %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期")], 
+            by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, `FirstDayReturn(%)` := ((`上市日收盤價(元)` - `承銷價格(元)`) / `承銷價格(元)`)] %>% 
+  .[, Quarter := lubridate::quarter(`上市櫃日期`, with_year = T) %>% as.character()] %>% 
+  .[order(Quarter, `上市櫃日期`)] 
+
+# 計算出EWU 並且標示出 EWUSign
+CalculateEWU <- IPODataToEWU %>% 
+  .[, mean(`FirstDayReturn(%)`), by = "Quarter"] %>% 
+  .[, MeanEWU := Reduce(`+`, shift(V1, 1:4)) / 4] %>%
+  dplyr::rename("UnderPricing" = "V1") %>% 
+  setDT() %>% 
+  .[, EWUSign := case_when(
+    UnderPricing >= (MeanEWU + MeanEWU / 2) ~ "Hot Season",
+    UnderPricing <= (MeanEWU - MeanEWU / 2) ~ "Cold Season",
+    TRUE ~ "Median")] %>% 
+  .[-c(1:4)]
+
+# 顯示出 CalculateEWU 所有結果，並以滾動捲軸呈現
+CalculateEWU %>%
+  mutate(EWUSign = case_when(
+    EWUSign == "Hot Season" ~ cell_spec(EWUSign, "html", color = "red", bold = T),
+    EWUSign == "Cold Season" ~ cell_spec(EWUSign, "html", color = "blue", bold = T),
+    TRUE ~ cell_spec(EWUSign, "html", color = "green", bold = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 做出冷熱季數量分配表
+EWU_Table <- CalculateEWU %>% 
+  pull(EWUSign) %>% 
+  table() %>% 
+  as.data.table() %>% 
+  dplyr::rename("EWUSign" = ".") 
+
+kable(EWU_Table, caption = "冷熱季數量分配表", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+# 將CalculateEWU的資料匯入ListFirm中
+EWU <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")] %>% 
+  .[, Quarter := lubridate::quarter(`上市櫃日期`, with_year = T) %>% as.character()] %>% 
+  left_join(., CalculateEWU %>% 
+              .[, .SD, .SDcols = c("Quarter", "EWUSign")], by = "Quarter") %>% 
+  setDT()
+
+# 用於合併入最終data中, 將 EWUSign 以數值表示，hot season = 3, median = 2, cold season = 1
+EWUToJoin <- EWU %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "EWUSign")] %>% 
+  .[, EWUSign := case_when(
+    EWUSign == "Hot Season" ~ 3,
+    EWUSign == "Median" ~ 2,
+    EWUSign == "Cold Season" ~ 1
+  )]
+
+
+Summary_EWU <- EWU %>% 
+  .[, .SD, .SDcols = c("IPOFail", "EWUSign")] %>%
+  .[, table(EWUSign), by = "IPOFail"] %>% 
+  .[, EWUSign := c("Cold Season", "Hot Season", "Median", 
+                    "Cold Season", "Hot Season", "Median")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0) %>% str_c(., "%"), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "EWUSign", "Num", "Percent")]
+
+kable(Summary_EWU, caption = "冷熱季數量分配表_IPO Fail or Not", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+Summary_EWU_Plot <- EWU %>% 
+  .[, .SD, .SDcols = c("IPOFail", "EWUSign")] %>%
+  .[, table(EWUSign), by = "IPOFail"] %>% 
+  .[, EWUSign := c("Cold Season", "Hot Season", "Median", 
+                    "Cold Season", "Hot Season", "Median")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "EWUSign", "Num", "Percent")]
+
+# kable(Summary_EWU, caption = "冷熱季數量分配表_IPO Fail or Not", align = "l") %>% 
+#   kable_styling(full_width = TRUE)
+
+# 畫圖顯示 EWU
+Summary_EWU_Plot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = EWUSign, y = Percent)) +
+  geom_bar(aes(x = EWUSign, y = Percent, fill = IPOFail), 
+           stat = "identity", position = "dodge") +
+  geom_label(aes(x = EWUSign, y = Percent, label = Percent)) +
+  ggtitle("以IPO失敗與否區分 EWU")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+  
+```
+
+## 11. Insider Ownership 
+
+* 探討IPO前三個月公司內部人士持股變化
+
+* 計算每一家公司在IPO前三個月的內部人士持股異動情形，Data中存在持股增減的變數，以IPO前一季增加總股數減去賣出總股數，得到 **Diff**，用以作為持股變化的變數。
+
+* 最終Data 為 **InsiderHolding**，用以合併進入最後的Data中。
+
+* 利用IPO是否失敗區分之結果發現，InsiderHolding平均來說有很大的差異 (Mean_InsiderHolding_WithFail)。
+
+* 實際去看IPO是否失敗以及是否有買入大於賣出的結果，並沒有太大的差別 (PositiveOrNot_InsiderHolding)。
+
+```{r echo = TRUE}
+load("Data/InsiderHolding_Data.RData")
+
+InsiderHolding <- InsiderHolding_Data %>% 
+  dplyr::rename("公司簡稱" = "公司代碼") %>% 
+  left_join(., ListFirm %>% .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期")], by = "公司簡稱") %>%
+  setDT() %>% 
+  .[as.Date(`上市櫃日期`) %>% format(., '%Y-%m-01') >= as.Date(`年月日`) %>% format(., '%Y-%m-01') 
+    & (as.Date(`上市櫃日期`) - 90) %>% format(., '%Y-%m-01') <= as.Date(`年月日`) %>% format(., '%Y-%m-01')] %>% 
+  .[, `:=` (HoldingIncrease = sum(`增加股數(合計)`), 
+            HoldingDecrease = sum(`減少股數(合計)`)), 
+    by = "公司簡稱"] %>% 
+  .[, HoldingDiff := HoldingIncrease - HoldingDecrease] %>% 
+  .[, head(.SD, 1), by = "公司簡稱"] %>% 
+  .[, .SD, .SDcols = c("公司簡稱",  "HoldingDiff")]
+
+# 顯示出InsiderHolding所有結果，並以滾動捲軸呈現
+InsiderHolding %>%
+  mutate(HoldingDiff = ifelse(HoldingDiff > 0,
+                  cell_spec(HoldingDiff, "html", color = "red", bold = T),
+                  cell_spec(HoldingDiff, "html", color = "green", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# left join 公司是否失敗的資料，用以計算平均
+InsiderHolding_WithFail <- FailData_ToJoin %>% 
+  left_join(., InsiderHolding, by = "公司簡稱") %>% 
+  setDT()
+
+# 製作"Positive", "Negative"的表格
+PositiveOrNot_InsiderHolding <- InsiderHolding_WithFail %>% 
+  .[, `:=` (HoldingDiffSign = ifelse(HoldingDiff > 0, 
+                                                "Positive", 
+                                                "Negative"))] %>%
+  .[, count(HoldingDiffSign), by = "IPOFail"] %>% 
+  .[, Percent := round((`freq` / sum(freq))*100, 0) %>% str_c(., "%"), 
+    by = "IPOFail"]
+
+colnames(PositiveOrNot_InsiderHolding) <- c("IPOFail", "HoldingDiffSign", 
+                                            "N", "Perc")
+
+# kable(PositiveOrNot_InsiderHolding, 
+#       caption = "以IPO失敗與否區分 HoldingDiffSign數量是否有差異", align = "l") %>%
+#   kable_styling(full_width = TRUE)
+
+PositiveOrNot_InsiderHolding_ToPlot <- InsiderHolding_WithFail %>% 
+  .[, `:=` (HoldingDiffSign = ifelse(HoldingDiff > 0, 
+                                                "Positive", 
+                                                "Negative"))] %>%
+  .[, count(HoldingDiffSign), by = "IPOFail"] %>% 
+  .[, Percent := round((`freq` / sum(freq))*100, 0), 
+    by = "IPOFail"]
+
+colnames(PositiveOrNot_InsiderHolding_ToPlot) <- c("IPOFail", "HoldingDiffSign", 
+                                            "N", "Percent")
+
+# 畫圖顯示 HoldingDiffSign
+PositiveOrNot_InsiderHolding_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail))]%>% 
+  ggplot(., aes(x = HoldingDiffSign, y = Percent)) +
+  geom_bar(aes(x = HoldingDiffSign, y = Percent, fill = IPOFail), 
+           stat = "identity", position = "dodge") +
+  geom_label(aes(x = HoldingDiffSign, y = Percent, label = Percent)) +
+  ggtitle("以IPO失敗與否區分 HoldingDiffSign")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+# 以IPO失敗與否區分之平均HoldingDiff
+Mean_InsiderHolding_WithFail <- InsiderHolding_WithFail %>% 
+  .[, mean(HoldingDiff, na.rm = T), by = "IPOFail"] %>% 
+  dplyr::rename("MeanInsiderHoldingDiff" = "V1")
+
+kable(Mean_InsiderHolding_WithFail, 
+      caption = "以IPO失敗與否區分之平均HoldingDiff", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```
+
+## 12. Lead percentage Sell 
+
+* The percentage of shares sold by the lead
+
+* 計算公司內部人IPO前三個月的持股賣量，並利用 **IPO承銷股數** 做為bench mark 藉以探討IPO前三個月的股票賣量與其之比值。
+
+* 建立 **LeadPercentageToJoin** 用以合併入最終的data中。
+
+* 以最終的Summary結果來看，IPO Fail 的公司平均來說會有比較高的Lead Percentage Sell 的情況。
+
+```{r echo = TRUE}
+
+# 利用 IPO當日的在外流通股數做為bench mark 藉以探討IPO前三個月的股票賣量約佔多少趴數。
+HoldingDecrease_Data <- InsiderHolding_Data %>% 
+  dplyr::rename("公司簡稱" = "公司代碼") %>% 
+  left_join(., ListFirm %>% .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期")], by = "公司簡稱") %>%
+  setDT() %>% 
+  .[as.Date(`上市櫃日期`) %>% format(., '%Y-%m-01') >= as.Date(`年月日`) %>% format(., '%Y-%m-01') 
+    & (as.Date(`上市櫃日期`) - 90) %>% format(., '%Y-%m-01') <= as.Date(`年月日`) %>% format(., '%Y-%m-01')] %>% 
+  .[, sum(`減少股數(合計)`), by = "公司簡稱"] %>% 
+  dplyr::rename("HoldingDecrease" = "V1") %>% 
+  setDT()
+
+# ## 以在外流通股數作為bench mark 
+# LeadPercentage <- IPO_Data %>% 
+#   .[, .SD, .SDcols = c("公司簡稱", "上市日收盤價(元)", "上市日市值(百萬元)")] %>% 
+#   .[, `NumberOfSharesOutstanding` := (`上市日市值(百萬元)` / `上市日收盤價(元)`)*1000000] %>% 
+#   left_join(., HoldingDecrease_Data, by = "公司簡稱") %>% 
+#   setDT() %>% 
+#   .[, HoldingDecrease := HoldingDecrease * 1000] %>% 
+#   .[, `HoldingDecreaseToNOSO(%)` := (HoldingDecrease / NumberOfSharesOutstanding)*100] %>% 
+#   left_join(., ListFirm %>% .[, .SD, .SDcols = c("公司簡稱", "IPOFail")], by = "公司簡稱") %>% 
+#   dplyr::select("公司簡稱", "IPOFail", "HoldingDecreaseToNOSO(%)", everything()) %>% 
+#   setDT()
+
+## 以 IPO發行股數 作為bench mark 
+LeadPercentage <- IPO_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "上市日收盤價(元)", "承銷股數(千股)")] %>% 
+  .[, `承銷股數(千股)` := `承銷股數(千股)`*1000] %>% 
+  left_join(., HoldingDecrease_Data, by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, HoldingDecrease := HoldingDecrease * 1000] %>% 
+  .[, `HoldingDecreaseToUnderWrittenShares(%)` := (HoldingDecrease / `承銷股數(千股)`)*100] %>% 
+  left_join(., ListFirm %>% .[, .SD, .SDcols = c("公司簡稱", "IPOFail")], by = "公司簡稱") %>% 
+  dplyr::select("公司簡稱", "IPOFail", "HoldingDecreaseToUnderWrittenShares(%)", everything()) %>% 
+  setDT()
+
+# 顯示出 LeadPercentage 所有結果，並以滾動捲軸呈現
+LeadPercentage %>%
+  mutate(`公司簡稱` = ifelse(IPOFail == 1,
+                  cell_spec(`公司簡稱`, "html", color = "red", bold = T),
+                  cell_spec(`公司簡稱`, "html", color = "blue", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 建立 LeadPercentageToJoin 用以合併入最後的data中
+LeadPercentageToJoin <- LeadPercentage %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "HoldingDecreaseToUnderWrittenShares(%)")] %>% 
+  .[, `HoldingDecreaseToUnderWrittenShares(%)` := ifelse(
+    is.na(`HoldingDecreaseToUnderWrittenShares(%)`) == T, 0, 
+    `HoldingDecreaseToUnderWrittenShares(%)`)]
+
+# Summary_LeadPercentage
+Summary_LeadPercentage <- GetSummaryGroupByIPOFailAndTotal(LeadPercentage,
+                                                           "HoldingDecreaseToUnderWrittenShares(%)")
+
+kable(Summary_LeadPercentage, 
+      caption = "以IPO失敗與否區分之Lead Percentage", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```
+
+## 13. IPO前三個月員工認購率
+
+* 計算各IPO公司IPO前三個月的員工認購總率。
+
+* 建立 **EmployeeSubscriptionRateToJoin** 用以合併入最終data。
+
+* 以最後summary結果來看，IPO 失敗的公司相對來說會有比較低的認購率。
+
+```{r echo = TRUE}
+EmployeeSubscriptionRate_Data <- read_xlsx("Data/EmployeeSubscriptionRate_Data.xlsx") %>% 
+  dplyr::rename("公司簡稱" = "公司") %>% 
+  left_join(., ListFirm %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期" , "IPOFail")], 
+            by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[as.Date(`上市櫃日期`) %>% format(., '%Y-%m-01') >= as.Date(`除權日`) %>% format(., '%Y-%m-01') 
+    & (as.Date(`上市櫃日期`) - 90) %>% format(., '%Y-%m-01') <= as.Date(`除權日`) %>% format(., '%Y-%m-01')] %>% 
+  .[, `員工認購率 %` := sum(`員工認購率 %`), by = "公司簡稱"] %>% 
+  .[, tail(.SD, 1), by = "公司簡稱"]
+
+# EmployeeSubscriptionRate 用以計算summary資訊
+EmployeeSubscriptionRate <- ListFirm %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPOFail")] %>% 
+  left_join(., EmployeeSubscriptionRate_Data %>% 
+              .[, .SD, .SDcols = c("公司簡稱",  "員工認購率 %")], 
+            by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[, `員工認購率 %` := ifelse(is.na(`員工認購率 %`) == T, 0, `員工認購率 %`)]
+
+# 顯示出 LeadPercentage 所有結果，並以滾動捲軸呈現
+EmployeeSubscriptionRate %>%
+  mutate(`公司簡稱` = ifelse(IPOFail == 1,
+                  cell_spec(`公司簡稱`, "html", color = "red", bold = T),
+                  cell_spec(`公司簡稱`, "html", color = "blue", italic = T))) %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 建立 EmployeeSubscriptionRateToJoin 用以合併入最終data中
+EmployeeSubscriptionRateToJoin <- EmployeeSubscriptionRate %>% 
+  .[, .SD, .SDcols = -c("IPOFail")]
+
+# Summary_EmployeeSubscriptionRate
+Summary_EmployeeSubscriptionRate <- GetSummaryGroupByIPOFailAndTotal(EmployeeSubscriptionRate, "員工認購率 %")
+
+kable(Summary_EmployeeSubscriptionRate, 
+      caption = "以IPO失敗與否區分之EmployeeSubscriptionRate", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```
+
+## 14. 各機構持股比例
+
+* 對象包含法人、金融機構、信託、個人、外資，以 **100- 個人** 做出 **機構持股(比率)** 變數。
+
+* 僅抓取最接近IPO上市櫃的年資料作為變數，沒有與上一筆資料做出diff是因為會使得資料更少。
+
+* 製作出 **InstitutionHolding_ToJoin** 用於合併入最終data中。
+
+* 以 summary 的結果來看，發現IPO失敗的公司平均來說有較高的機構持股，但以中位數來說，並沒有太大的差別。
+
+```{r echo = TRUE, warning = F, message = F}
+InstitutionHolding_Data <- read_xlsx("Data/InstitutionHolding_Data.xlsx") %>% 
+  dplyr::rename("公司簡稱" = "公司") %>% 
+  left_join(., ListFirm %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "首次REG上市日", "上市櫃日期", "ROTC_Time", "IPOFail")], 
+            by = "公司簡稱") %>% 
+  setDT() 
+
+# 抓取距離上市櫃日期最接近的資料，看機構持股變化。
+InstitutionHolding_undealwith <- InstitutionHolding_Data %>% 
+  .[format(as.Date(`年度`), '%Y-%m-01') <= format(as.Date(`上市櫃日期`), '%Y-%m-01')] %>%
+  .[, .SD, .SDcols = c("公司簡稱", "年度", "上市櫃日期", "IPOFail", 
+                       grep("(比率){1}", colnames(.), value=T)[c(1:6, 11)])] %>% 
+  .[, tail(.SD, 1), by = "公司簡稱"]
+
+InstitutionHolding_undealwith %>% 
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+InstitutionHolding <- InstitutionHolding_undealwith %>% 
+  .[, `機構持股(比率)` := 100 - `本國個人(比率)`] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "年度", "上市櫃日期", "IPOFail", "機構持股(比率)")]
+
+# Data to Join 
+InstitutionHolding_ToJoin <- InstitutionHolding %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "機構持股(比率)")]
+
+# # 畫圖後發現機構持股並沒有太大的差別
+# GeomPoint_IPOFailOrNot(InstitutionHolding, "機構持股(比率)")
+
+# Summary 
+Summary_InstitutionHolding <- InstitutionHolding %>% 
+  GetSummaryGroupByIPOFailAndTotal(., "機構持股(比率)")
+
+Summary_InstitutionHolding %>% 
+  kable(., 
+      caption = "以IPO失敗與否區分之InstitutionHolding", align = "l") %>%
+  kable_styling(full_width = TRUE)
+  
+
+```
+
+## 15. 質押比率
+
+* 計算公司 **董監事、經理人、大股東** 在上市櫃 **前六個月平均質押(Pledge) % 數**，由於過去研究發現董監事質押趴數會與公司績效呈現負相關，因此製作此變數探討IPO存活率與其的關係。
+(過去對董監事股權質押的研究探討重點大部份在於董監事股權質押與財
+務危機的相關性 (熊大中，2000；洪昕琳，2006)、董監事股權質押與公司績
+效的相關性 (高蘭芬，2002；楊淑昭，2005)，以及董監事股權質押對財務報
+導品質的影響 (Kao et al., 2004; Lee & Yeh, 2004; Chen & Hu, 2007; 高蘭芬，
+2002；林美鳳等，2009)，大部分的實證結果皆指出董監質押比率對公司績效
+會產生顯著的負面影響，也可能導致公司發生財務危機。)
+
+* **經理人質押股%** 與 **董監質押股%** 皆有加入親屬的質押部分。
+
+* 最後製作 **PledgeToJoin**，用以合併入最終data中。
+
+* 從最終的summary結果來看，**經理人質押股%, 大股東質押%** 平均來說皆是IPO沒有失敗的公司較大，而 **董監質押股%** 則是IPO失敗較大，符合先前論文研究之成果。
+
+```{r echo = TRUE}
+load("Data/BoardHolding_Data.RData")
+
+BoardHolding <- BoardHolding_Data %>% 
+  dplyr::rename("公司簡稱" = "公司代碼") %>% 
+  left_join(., ListFirm %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")], 
+            by = "公司簡稱") %>% 
+  dplyr::select("公司簡稱", "年月日", "上市櫃日期", "IPOFail", everything()) %>%
+  setDT() %>% 
+  .[format(as.Date(`上市櫃日期`), '%Y-%m-01') >= format(as.Date(`年月日`), '%Y-%m-01') 
+    & format((as.Date(`上市櫃日期`) - 180), '%Y-%m-01') <= format(as.Date(`年月日`), '%Y-%m-01')] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "年月日", "上市櫃日期", "IPOFail", 
+                       grep("(%){1}", colnames(.), value=T))]
+
+Pledge <- BoardHolding %>% 
+  .[, `:=`(`經理人質押股%` = `經理人質押股%` + `經理人親屬質押%`,
+           `董監質押股%` = `董監質押股%` + `董監事親屬質押%`)] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "年月日", "上市櫃日期", "IPOFail", 
+                       "經理人質押股%", "大股東質押%", "董監質押股%")] %>% 
+  .[, lapply(.SD, mean), by = "公司簡稱"]
+
+# 最後可將PledgeToJoin合併入最終data中
+PledgeToJoin <- Pledge %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "經理人質押股%", "大股東質押%", "董監質押股%")]
+
+# Summary_經理人IPO過去六個月平均質押率
+lapply(c("經理人質押股%", "大股東質押%", "董監質押股%"), 
+               function(x) GetSummaryGroupByIPOFailAndTotal(Pledge, x))[[1]] %>% 
+  kable(., 
+      caption = "Summary_經理人IPO過去六個月平均質押率", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+# Summary_大股東IPO過去六個月平均質押率
+lapply(c("經理人質押股%", "大股東質押%", "董監質押股%"), 
+       function(x) GetSummaryGroupByIPOFailAndTotal(Pledge, x))[[2]] %>% 
+  kable(., 
+      caption = "Summary_大股東IPO過去六個月平均質押率", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+# Summary_董監事IPO過去六個月平均質押率
+lapply(c("經理人質押股%", "大股東質押%", "董監質押股%"), 
+               function(x) GetSummaryGroupByIPOFailAndTotal(Pledge, x))[[3]] %>% 
+  kable(., 
+      caption = "Summary_董監事IPO過去六個月平均質押率", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```
+
+## 16. 獨立董事人數
+
+* 最後輸出data為 **IndependentBoard_Data** ，將藉以導入最終data中。
+
+* 由 **Summary_獨立董事分佈差異** 中可以發現，IPO失敗的公司有較多的比例其獨立董事人數會大於平均(佔約76 %)，但IPO未失敗的公司僅佔約71% 左右。
+
+```{r echo = TRUE}
+load("Data/BoardHolding_Data.RData")
+
+SupervisorAmount_Data <- BoardHolding_Data %>% 
+  dplyr::rename("公司簡稱" = "公司代碼") %>% 
+  left_join(., ListFirm %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "上市櫃日期", "IPOFail")], 
+            by = "公司簡稱") %>% 
+  dplyr::select("公司簡稱", "年月日", "上市櫃日期", "IPOFail", everything()) %>%
+  setDT() %>% 
+  .[format(as.Date(`上市櫃日期`), '%Y-%m-01') >= format(as.Date(`年月日`), '%Y-%m-01') 
+    & format((as.Date(`上市櫃日期`) - 180), '%Y-%m-01') <= format(as.Date(`年月日`), '%Y-%m-01')] %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "年月日", "上市櫃日期", "IPOFail", 
+                       grep("人數{1}", colnames(.), value=T))] %>% 
+  .[, .SD, .SDcols = -c("董事長人數", "常監人數", "外資獨立監察人數")] %>% # 刪除掉不適合作為變數的 (例如: 變異性不足)
+  .[, lapply(.SD, mean), by = "公司簡稱"] %>% 
+  dendroTools::round_df(., digits = 0)
+
+# sapply(SupervisorAmount_Data[, c(5:15)], table)
+
+# 以IPO是否失敗來區分看平均的結果，並沒有太大的區別。
+# lapply(names(SupervisorAmount_Data)[5:15], 
+#                function(x) GetTableGroupByIPOFailOrNot(SupervisorAmount_Data, x))
+
+IndependentBoard_Data <- SupervisorAmount_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "獨立董事人數")]
+
+# SupervisorAmount_Data %>% 
+#   .[, .SD, .SDcols = c("公司簡稱", "IPOFail", "獨立董事人數")] %>% 
+#   GetTableGroupByIPOFailOrNot(., "獨立董事人數") %>% 
+#   kable(., 
+#       caption = "Summary_獨立董事分佈差異", align = "l") %>%
+#   kable_styling(full_width = TRUE)
+
+  
+# 畫圖顯示 SupervisorAmount
+SupervisorAmount_Data %>% 
+  .[, .SD, .SDcols = c("公司簡稱", "IPOFail", "獨立董事人數")] %>% 
+  GetTableGroupByIPOFailOrNot(., "獨立董事人數") %>% 
+  ggplot(., aes(x = `是否大於平均`, y = `Freq(%)`)) +
+  geom_bar(aes(x = `是否大於平均`, y = `Freq(%)`, fill = Sign), 
+           stat = "identity", position = "dodge") +
+  geom_label(aes(x = `是否大於平均`, y = `Freq(%)`, label = `Freq(%)`)) +
+  ggtitle("以IPO失敗與否區分 SupervisorAmount")+
+  ylab("Freq (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        text = element_text(family="黑體-繁 中黑"),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+
+
+```
+
+
+
+## 17. Final Data 
+
+* 將所有變數的資料匯總，建立 **FinalData1**
+
+* 在 **OtherIPOFirstDayReturn, OtherIPOInitialReturn, HoldingDiff, 機構持股(比率)** 中 各自存在數量不一的遺漏值，因此利用 **K-Nearest Neighbours** 方法來填補遺漏值。
+
+```{r echo=TRUE, warning=FALSE, message = FALSE}
+# 由於 PledgeToJoin 裡的變異性實在太低 因此直接刪掉
+
+JoinList <- list(IPO_DoNotNeedToDealWith, UnderwriterReputation_ToJoin, 
+                 MarketReturnPriorOneYearTOJoin, FirstAndIntialFinalToJoin, 
+                 IPOHeatDegreeToJoin, MarketValueOnIPODayTOFinalData, AccountingFirmToJoin, 
+                 NumIPOToJoin, EWUToJoin, InsiderHolding, LeadPercentageToJoin, 
+                 EmployeeSubscriptionRateToJoin, InstitutionHolding_ToJoin, 
+                 IndependentBoard_Data)
+
+FinalData_IPO_WithNA <- plyr::join_all(JoinList, by = "公司簡稱", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  .[, `:=` (IPOHeatDegree = as.numeric(IPOHeatDegree),
+            ROTC_Time = as.numeric(ROTC_Time),
+            FirmAgeBeforeIPO = as.numeric(FirmAgeBeforeIPO))]
+
+# 確認每一個變數的NA數量
+CheckNAInFinalData_IPO_WithNA <- FinalData_IPO_WithNA %>% 
+  .[, lapply(.SD, is.na), .SDcols = c(names(FinalData_IPO_WithNA)[3:25])] %>% 
+  .[, lapply(.SD, sum)] %>% 
+  melt(., value.name = "NA_Amount") %>% 
+  .[NA_Amount != 0]
+
+CheckNAInFinalData_IPO_WithNA %>% 
+  kable(., 
+      caption = "Check NA Amount", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+## 遞補遺漏值 (FS_Final 尚未遞補遺漏值)
+library(DMwR)
+
+FinalData_IPO <- FinalData_IPO_WithNA[, c(3:25)] %>% 
+  as.data.frame() %>% 
+  knnImputation(.) %>% 
+  cbind(FinalData_IPO_WithNA[, c(1:2)], .) %>% 
+  setDT() # %>% 
+  # .[, `:=` (`申購積極度` = log(1/(平均中籤率/100)))] %>% 
+  # .[, .SD, .SDcols = -c("平均中籤率")]
+
+CheckNAInFinalData_IPO <- FinalData_IPO %>% 
+  .[, lapply(.SD, is.na), .SDcols = c(names(FinalData_IPO)[3:25])] %>% 
+  .[, lapply(.SD, sum)] %>% 
+  melt(., value.name = "NA_Amount") %>% 
+  .[NA_Amount != 0]
+
+save(FinalData_IPO, file = "Data/FinalData_IPO.RData")
+
+# 顯示出 FinalData_IPO 所有結果，並以滾動捲軸呈現
+FinalData_IPO %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+
+```
+
