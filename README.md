@@ -31,5 +31,4 @@
 	透過 ROTCTradingVariable.Rmd 整理所有IPO公司再興櫃期間之交易變數，例如0交易量的天數等，並將結果呈現於 ROTCTradingVariable.html。
 
 5. BuildLogisticRegressionModel_2.Rmd
-
-	透過BuildL_ogisticRegressionModel.Rmd 將所有變數整合後丟入 Logistic Regression 中，並將結果呈現於 BuildLogisticRegressionModel.html 中。_
+	透過BuildLogisticRegressionModel_2.Rmd 將所有變數整合後丟入 Logistic Regression 中，並將結果呈現於 BuildLogisticRegressionModel_2.html 中。
