@@ -11,5 +11,25 @@
 ### Code特色 ###
   相比於之前所做的作品，這次撰寫Code的過程中，我採取運行方式更快的data.table來進行撰寫，之前的撰寫風格皆是利用data.frame 以及dplyr的函式進行資料處理，雖然函式好用，但資料量一大或電腦硬體不好時，容易拖慢運行速度，因而使用data.table提升運算效能。
   
-### 流程說明 ###
-  目前研究進度為抓取IPO公司基本資料、興櫃市場資料、重大財務危機資訊來進行EDA，期望先透過資料探索的過程更加了解台灣的IPO市場。
+###流程說明###
+
+1. FindFirmList.Rmd
+
+	透過 FindFirmList.Rmd 尋找符合條件的公司（EX: 挑選出2002~2014年之IPO公司，並排除金融股或興櫃期間不滿半年之公司），最終確認樣本數為659家公司。
+	透過圖表等方式做EDA，探討台灣IPO公司之特性，可透過FindFirmList.html觀看結果。
+
+2. DealWithIPOVariables.Rmd
+
+	透過 DealWithIPOVariables.Rmd 整理所有IPO相關的變數，並將結果呈現於DealWithIPOVariables.html中。
+
+3. FSVariables.Rmd
+
+	透過 FSVariables.Rmd 整理IPO公司興櫃期間之財報變數，並將其與相對應的市場及產業平均比值，最終將結果呈現於 FSVariables.html 中。
+
+4. ROTCTradingVariable.Rmd
+
+	透過 ROTCTradingVariable.Rmd 整理所有IPO公司再興櫃期間之交易變數，例如0交易量的天數等，並將結果呈現於 ROTCTradingVariable.html。
+
+5. BuildLogisticRegressionModel.Rmd
+
+	透過BuildLogisticRegressionModel.Rmd 將所有變數整合後丟入 Logistic Regression 中，並將結果呈現於 BuildLogisticRegressionModel.html 中。
