@@ -1,0 +1,1080 @@
+---
+title: "Build Logistic Regression Model_2"
+author: "Rolando"
+date: "3/27/2020"
+output: 
+  html_document :
+    toc : TRUE
+    toc_depth : 2
+    toc_float :
+      collapsed : TRUE
+      smooth_scroll : TRUE
+    number_selection : TRUE 
+    code_folding : hide
+---
+
+# 重大改變
+
+1. 對於IPO 與AllVariables 變數，將標準化與未標準化後的資料分別丟入。
+2. 新增 **VIFToChooseVars** function，在丟入Logistic 之後，Step之前先以 VIFToChooseVars 將VIF過大的變數挑掉，挑完後再丟入Step中跑，發現顯著結果有變。
+3. 在使用所有變數丟入模型後，發現未經標準化的資料跑出之模型AUC較有標準化後的資料低。
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/USER/Desktop/FightForMasterOfDegree")
+```
+
+```{r echo = FALSE, include = FALSE, message = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(readxl)
+library(lubridate)
+library(PerformanceAnalytics)
+library(ggrepel)
+library(data.table)
+library(knitr)
+library(plyr)
+# library(rmdWidgets)
+library(kableExtra)
+library(formattable)
+library(dplyr)
+
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(randomForestExplainer)
+library(purrr)
+library(ROCR)
+library(corrplot)
+library(DescTools) # Print the R squared in Glm
+library(car) # Vif 共線性檢驗
+library(caret)
+library(e1071)
+library(ranger)
+library(lattice)
+library(DMwR) # SMOTE
+library(ROSE) # ROSE 模擬數據
+library(pROC)
+
+
+```
+
+```{r SomeFunction, echo = FALSE, include = FALSE, message = FALSE}
+## 利用VIF挑選變數，挑掉VIF過大的變數，第一個引數為Data 第二個為 VIF挑選閥值
+
+
+VIFToChooseVars <- function(DataName, VIFLevel){
+
+  repeat{
+ 
+    Model <- glm(IPOFail ~ ., 
+                 data = DataName,
+                 family = binomial(link = logit))
+    
+    VIF_0 <- car::vif(Model) %>%
+      data.frame()
+
+    VIF <- VIF_0 %>%
+      mutate(., VariablesName = row.names(VIF_0)) %>%
+      dplyr::rename(., "GVIF" = ".") %>%
+      setDT() %>%
+      .[, .SD, .SDcols = c("VariablesName", "GVIF")] %>%
+      .[order(-GVIF)] %>%
+      .[GVIF >= VIFLevel]
+    
+    # VIF <- car::vif(Model) %>%
+    #   data.frame() %>% 
+    #   mutate(., VariablesName = row.names(.)) %>%
+    #   setDT() %>%
+    #   .[, .SD, .SDcols = c("VariablesName", "GVIF")] %>%
+    #   .[order(-GVIF)] %>%
+    #   .[GVIF >= VIFLevel]
+    
+    if(nrow(VIF) == 0) break
+    
+    # Condition = nrow(VIF)
+    
+    VarToDelect <- VIF$VariablesName[1]
+    
+    DataName <- DataName %>% 
+      setDT() %>% 
+      .[, .SD, .SDcols = -c(VarToDelect)]
+
+  }
+  
+  VIF_Final_0 <- car::vif(Model) %>%
+    data.frame()
+
+  VIF_Final <- VIF_Final_0 %>%
+    mutate(., VariablesName = row.names(VIF_Final_0)) %>%
+    dplyr::rename(., "GVIF" = ".") %>%
+    setDT() %>%
+    .[, .SD, .SDcols = c("VariablesName", "GVIF")] %>%
+    .[order(-GVIF)]
+  
+  # VIF_Final <- car::vif(Model) %>%
+  #     data.frame() %>% 
+  #     mutate(., VariablesName = row.names(.)) %>%
+  #     setDT() %>%
+  #     .[, .SD, .SDcols = c("VariablesName", "GVIF")] %>%
+  #     .[order(-GVIF)] %>%
+  #     .[GVIF >= VIFLevel]
+  
+  return(VIF_Final)
+}
+
+
+# VIF_AllVars_Nor <- VIFToChooseVars(TrainingData_AllVariable_Nor, 5)
+
+
+```
+
+
+## Final Data 
+
+* 共有三份Data，分別為 **FinalData_IPO, FinalData_FS, FinalData_ROTCTrading**
+
+* 更改過的變數如下：
+
+1. 平均中籤率 : 原本根據 **申購積極性對新上市公司股票績效的影響 (王朝仕、陳振遠 2008，管理學報)**，是利用 log (1/中籤率) 作為積極性的代理變數，但由於data中的資料有公司的中籤率為0，無法使用此方式計算， 因此直接以平均中籤率作為積極性的代理變數。
+
+2. LogMarketValueOnIPODay : 將 Market Value 取 log。
+
+3. HoldingDecreaseToUnderWrittenShares(%) : 改以承銷量作為分母計算。
+
+4. Dividend_Dummy、NegativeNetIncome : 新增此兩變數代表是否發放股利或是否有負的NI (IPO前最後一季財報。)
+
+5. SD_Return250DaysAfterIPO : 計算IPO後250個交易日之報酬率標準差。
+
+6. SD_MarketModelResidual : 計算IPO後250個交易日之四因子模型殘差，代表公司的獨有風險。
+
+7. 新增 HoldingDiff_Dummy 變數，1代表公司IPO前三個月 淨買量總和 > 淨賣量總和。
+
+```{r echo = TRUE}
+load("Data/FinalData_IPO.RData")
+load("Data/FinalData_FS.RData")
+load("Data/FinalData_ROTCTrading.RData")
+
+FinalData_Basic <- FinalData_FS %>% 
+  .[, .SD, .SDcols = c(1:8)]
+
+FinalData_FS <- FinalData_FS %>% 
+  .[, .SD, .SDcols = -c(2:8)]
+
+JoinList <- list(FinalData_FS, FinalData_IPO, FinalData_ROTCTrading)
+
+FinalDataWithAllVariable <- plyr::join_all(JoinList, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+# 顯示出 FinalData_IPO 所有結果，並以滾動捲軸呈現
+FinalData_IPO %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 顯示出 FinalData_FS 所有結果，並以滾動捲軸呈現
+FinalData_FS %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 顯示出 FinalData_ROTCTrading 所有結果，並以滾動捲軸呈現
+FinalData_ROTCTrading %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+```
+
+## 相關係數檢驗
+
+* 透過 **corrplot** print 出所有變數的相關係數矩陣，另外透過 GetHighCorr_Result 設定需導入的資料集以及想要得相關係數等級，即可製作出高相關係數資料表。
+
+* 使用 GetHighCorr_Result時，需先確保所有變數均為要判別相關係數使用，不可有不需計算的變數，EX: 公司簡稱。
+
+* 計算各變數間的相關係數，並挑出相關係數高於0.75的變數。
+
+1. SD_MarketModelResidual、SD_Return250DaysAfterIPO 除了互相具有高度相關外(99.7 %)，也各自與 FirstDayReturn(%) 有非常高度的相關( 96% )。
+
+2. ZeroTradingDaysRatio 與 ZeroReturnDaysRatio 具有非常高度的相關 (97.36%)，但卻沒有與AmihudRatio 有高度相關的關係。
+
+3. NumIPO 與 EWU 分別以IPO前四季之IPO數量與平均Underpricingy做Benchmark來代表IPO發行冷熱季，但從相關係數中並沒有看到有高度相關之結果。
+
+* 變數調整：
+
+1. 由下表可以得知，**SD_MarketModelResidual、SD_Return250DaysAfterIPO、FirstDayReturn** 關連性極高，但還是選擇先將三者都丟入模型，並於最後檢測VIF看是否需要刪除。
+
+2. **ZeroReturnDaysRatio，ZeroTradingDaysRatio** 最終選擇ZeroTradingDaysRatio。
+
+3. **OtherIPOInitialReturn、OtherIPOFirstDayReturn** 最終選擇OtherIPOInitialReturn。
+
+4. **研究發展費用率_ToMarket、營業費用率_ToMarket**，雖然相關係數到82%，但還是選擇先將二者都丟入模型，並於最後檢測VIF看是否需要刪除。
+
+5. **"承銷價格(元)、承銷金額.千元、總承銷股數.千股.** 由於上市日市值.百萬元可由其他兩者推出，因此選擇刪除 上市日市值.百萬元。
+
+6. **Dividend_Dummy、股利支付率_ToMarket**，雖然相關係數到77%，但還是選擇先將二者都丟入模型，並於最後檢測VIF看是否需要刪除。
+
+* 需刪除變數：
+
+1. ZeroReturnDaysRatio
+
+2. OtherIPOFirstDayReturn
+
+3. 承銷金額.千元
+
+```{r 相關係數檢驗, echo = TRUE}
+
+GetHighCorr_Result <- function(Data, CorrLevel){
+  
+  ## 建立相關係數Data
+  CorrData <- cor(Data) %>% 
+    as.data.table() %>% 
+    .[, Variable := names(Data)] %>% 
+    dplyr::select(., "Variable", everything())
+  
+  ## Function 用於找出每一個變數的高相關係數關係變數
+  GetHighCorr <- function(Variable_Name){
+  
+  Data <- CorrData %>% 
+    .[, .SD, .SDcols = c("Variable", Variable_Name)] %>% 
+    .[abs(get(Variable_Name))>= CorrLevel] %>% 
+    .[, Variable2 := names(.)[2]] %>% 
+    setnames(., Variable_Name, "Corr") %>% 
+    .[, .SD, .SDcols = c("Variable", "Variable2", "Corr")]
+  
+  return(Data)
+    
+  }
+  
+  ## 利用迴圈針對每一個變數找到高相關係數關係並疊合
+  HighCorr_UnClean <- NULL
+  for (i in names(CorrData)[-1]) {
+    
+    Data <- GetHighCorr(i)
+    
+    if (nrow(Data) == 1) next
+    
+    HighCorr_UnClean <- rbind(HighCorr_UnClean, Data) %>% 
+      setDT() %>% 
+      .[Corr != 1]
+  }
+  
+  ## 去掉重複值
+  HighCorr <- HighCorr_UnClean %>% 
+  .[order(-Corr)] %>% 
+  .[, head(.SD, 1), by = "Corr"] %>% 
+  .[, .SD, .SDcols = c("Variable", "Variable2", "Corr")]
+  
+  return(HighCorr)
+  
+}
+
+HighCorr_AllVariable <- FinalDataWithAllVariable %>%
+  .[, -c(1, 2)] %>% 
+  GetHighCorr_Result(., 0.7)
+
+HighCorr_AllVariable %>% 
+  kable(., caption = "HighCorr_AllVariable", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+## Remove the Variables (High Corr)
+
+* Remove the variable which have high corr with others.
+
+* 以 **Data_AllVariable** 作為最終data，得以導入Model中。
+
+* 以 **Data_IPO** 作為尚未考慮興櫃期間變數的資料集。
+
+```{r RemoveTheVariables(High Corr), echo = TRUE}
+FactorCols_FS <- c("Dividend_Dummy", "NegativeNetIncome")
+Data_FS <- FinalData_FS %>% 
+  .[, (FactorCols_FS):= lapply(.SD, factor), .SDcols = FactorCols_FS]
+
+FactorCols_IPO <- c("IPOFail", "Market", "ElectricOrNot", "Big4Natl", 
+                    "NumIPOSign", "VCBack")
+Data_IPO <- FinalData_IPO %>% 
+  .[, .SD, .SDcols = -c("OtherIPOFirstDayReturn", "UnderwrittenAmount_1000")] %>% 
+  .[, (FactorCols_IPO):= lapply(.SD, factor), .SDcols = FactorCols_IPO]
+
+Data_ROTCTrading <- FinalData_ROTCTrading %>% 
+  .[, .SD, .SDcols = -c("ZeroReturnDaysRatio")]
+
+## 建立包含所有變數的data
+JoinList2 <- list(Data_FS, Data_IPO, Data_ROTCTrading)
+
+Data_AllVariable <- plyr::join_all(JoinList2, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+## 建立僅包含興櫃變數的data 
+DataWithIPOFail <- Data_IPO %>% 
+  .[, .SD, .SDcols = c("Firms", "IPOFail")]
+
+JoinList3 <- list(DataWithIPOFail, Data_FS, Data_ROTCTrading)
+
+Data_ROTC <- plyr::join_all(JoinList3, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+# save(Data_AllVariable, file = "Data/Data_AllVariable.RData")
+
+```
+
+## Normalization 
+
+* 利用 NormalizeFunciton 抓出非factor的變數並進行標準化。
+
+* 製作 Data_AllVariable_Nor、Data_IPO_Nor 作為已經標準化後的資料，並分成僅有IPO資料以及加入FS、ROTCTrading 的AllVariables資料。
+
+```{r Normalization, echo = TRUE}
+NormalizeFunciton <- function(Data){
+  
+  NeedToNormalize <- Filter(is.factor, Data) %>% names()
+
+  ## 以常態標準化方式將所有變數進行 標準化
+  Data_Nor <- Data %>% 
+    .[, .SD, .SDcols = -c("Firms", NeedToNormalize)] %>% 
+    scale(.) %>% 
+    as.data.table() %>% 
+    cbind(., Data %>% 
+    .[, .SD, .SDcols = c("Firms", NeedToNormalize)]) %>% 
+    dplyr::select(., "Firms", "IPOFail", everything())
+  
+  return(Data_Nor)
+}
+
+Data_AllVariable_Nor <- NormalizeFunciton(Data_AllVariable)
+
+Data_IPO_Nor <- NormalizeFunciton(Data_IPO)
+
+Data_ROTC_Nor <- NormalizeFunciton(Data_ROTC)
+
+## 滾動捲軸顯示 Data_AllVariable_Nor
+Data_AllVariable_Nor %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+```
+
+## Get Training Data And Testing Data
+
+* 導入需要的資料，
+
+1. 設定 TrainingOrTest 引數，若 TrainingOrTest == 1，則回傳Training Data， 若為 0，則回傳 Testing Data。
+2. 設定 SampleLevel，決定要分多少比例的資料去Training，若設定為0.7，代表分出7成的資料進TrainingData。
+
+```{r TrainAndTest, echo = TRUE}
+
+GetTrainingAndTestingData <- function(Data, SampleLevel, TrainingOrTest, SeedNumber){
+  
+  ## Seperate the y to One and Zero
+  Input_Ones <- Data %>% 
+    .[IPOFail == 1]
+  Input_Zeros <- Data %>% 
+    .[IPOFail == 0]
+ 
+  ## 挑選資料
+  set.seed(SeedNumber)
+  Input_Ones_Training_Row <- sample(1:nrow(Input_Ones), 
+                                    SampleLevel*nrow(Input_Ones))
+  Input_Zeros_Training_Row <- sample(1:nrow(Input_Zeros), 
+                                     SampleLevel*nrow(Input_Zeros))
+  
+  ## 建立 Training Data
+  Training_Ones <- Input_Ones[Input_Ones_Training_Row,]
+  Training_Zeros <- Input_Zeros[Input_Zeros_Training_Row,]
+  
+  TrainingData <- rbind(Training_Ones, Training_Zeros) %>% 
+    merTools:::shuffle()
+  
+  # 產生測試資料集
+  Test_Ones <- Input_Ones[-Input_Ones_Training_Row,]
+  Test_Zeros <- Input_Zeros[-Input_Zeros_Training_Row,]
+  
+  TestData <- rbind(Test_Ones, Test_Zeros) %>% 
+    merTools:::shuffle()
+  
+  if (TrainingOrTest == 1) {
+    
+    return(TrainingData)
+    
+  }else{
+    
+    return(TestData)
+    
+  }
+}
+
+```
+
+## Logistic Regression IPO_Nor
+
+* 一開始僅先丟入 IPO相關變數，觀察其ROC與混淆矩陣。
+
+1. 平均中籤率 越高，代表投資人對於此股越不積極，IPO失敗率提高。
+2. ROTC_Time 越高，待在興櫃時間越長，IPO失敗率提高。
+3. FirmAgeBeforeIPO 越高，IPO失敗率降低。
+4. Big4Natl1 當公司的會計公司為四大時，IPO失敗率降低。
+5. HoldingDiff 為買入-賣出，當數值越大，代表IPO前三個月Insider買入股票越多，IPO失敗率提高。
+6. 機構持股 比例越高，IPO失敗率提高。
+
+```{r DataIPO_WithNormalization, echo = TRUE, message= FALSE, warning= FALSE}
+## Training and Test For IPO Variables
+TrainingData_IPO_Nor <- GetTrainingAndTestingData(Data_IPO_Nor, 0.8, 1, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                        labels = make.names(levels(IPOFail))))
+TestData_IPO_Nor <- GetTrainingAndTestingData(Data_IPO_Nor, 0.8, 0, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                        labels = make.names(levels(IPOFail))))
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     # sampling = "rose", 
+                     savePredictions = T)
+
+## Use Training data to build logistic model, Only contain IPO variables
+Model_Logistic_IPO_Nor <- train(form = IPOFail ~ ., 
+                                data = TrainingData_IPO_Nor,
+                                trControl = ctrl, 
+                                method = "glm",
+                                family = "binomial",
+                                metric = "ROC",
+                                preProc=c("center", "scale"))
+
+summary(Model_Logistic_IPO_Nor$finalModel)
+
+# 共線性檢測
+car::vif(Model_Logistic_IPO_Nor$finalModel) %>%
+  as.data.frame() %>% 
+  kable(., caption = " VIF Test_Normalization IPO", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+## predict the result 
+
+Logis_pred_IPO_Nor_WithoutStep <- predict.train(Model_Logistic_IPO_Nor, 
+                                                newdata = TestData_IPO_Nor, 
+                                                type = "raw")
+
+## confusionMatrix
+Conf_IPO_Nor_WithoutStep <- caret::confusionMatrix(Logis_pred_IPO_Nor_WithoutStep, TestData_IPO_Nor$IPOFail)
+
+Conf_IPO_Nor_WithoutStep$table %>% 
+  kable(., caption = "ConfusionMatrix_IPO_Nor_WithoutStep", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+* 僅使用 標準化過的 IPO 變數且做 StepAIC
+
+```{r DataIPO_WithNormalization_StepAIC, echo = TRUE, message= FALSE, warning= FALSE}
+## glmStepAIC
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     #sampling = "rose", 
+                     savePredictions = T)
+
+# set.seed(6000)
+Step_Logistic_IPO_Nor <- train(form = IPOFail ~ ., 
+                               data = TrainingData_IPO_Nor,
+                               trControl = ctrl, 
+                               method = "glmStepAIC",
+                               family = "binomial",
+                               metric = "ROC",
+                               importance = "permutation",
+                               preProc=c("center", "scale"),
+                               trace = FALSE)
+
+Coe_Step_Logistic_IPO_Nor <- summary(Step_Logistic_IPO_Nor)
+
+## IPO Kfold Means ROC
+Logistic_KfoldROC_IPO <- Step_Logistic_IPO_Nor$resample
+mean(Logistic_KfoldROC_IPO$ROC)
+sd(Logistic_KfoldROC_IPO$ROC)
+write.csv(Logistic_KfoldROC_IPO, file = "Output/Logistic_KfoldROC_IPO_100.csv")
+
+# 共線性檢測
+car::vif(Step_Logistic_IPO_Nor$finalModel) %>%
+  data.frame() %>% 
+  kable(., caption = "VIF Test_ NormalizationIPO with StepAIC", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+PseudoR2(Step_Logistic_IPO_Nor$finalModel, which = "Nagelkerke") %>% 
+  data.frame() %>% 
+  kable(., caption = "R Squared_ NormalizationIPO with StepAIC", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+VarImp_Logistic_IPO_Nor <- varImp(Step_Logistic_IPO_Nor$finalModel) %>% 
+                                  mutate(IPO_Nor_Variables = rownames(.)) %>% 
+                                  arrange(-Overall) %>% 
+                                  select(IPO_Nor_Variables, Overall)
+
+ggplot(VarImp_Logistic_IPO_Nor, 
+       aes(x=reorder(IPO_Nor_Variables, Overall), y=Overall, fill=Overall))+ 
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Variable Importance")+
+      xlab("")+
+      ggtitle("IPO_Nor Variables Importance by siginificant level")+
+      guides(fill=F)+
+      scale_fill_gradient(low="red", high="blue")
+
+## predict the result 
+
+Logis_pred_IPO_Nor <- predict.train(Step_Logistic_IPO_Nor, 
+                                    newdata = TestData_IPO_Nor, 
+                                    type = "raw")
+
+## confusionMatrix
+Conf_IPO_Nor <- caret::confusionMatrix(Logis_pred_IPO_Nor, TestData_IPO_Nor$IPOFail)
+
+Conf_IPO_Nor$table %>% 
+  kable(., caption = "ConfusionMatrix_IPO_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+### ROC Plot 
+Logis_probability_IPO_Nor <- predict(Step_Logistic_IPO_Nor, 
+                                     newdata = TestData_IPO_Nor, 
+                                     type = 'prob') %>% 
+  pull(X1)
+
+pred_IPO_Nor <- ROCR::prediction(Logis_probability_IPO_Nor, labels = TestData_IPO_Nor$IPOFail)
+perf_IPO_Nor <- performance(pred_IPO_Nor, measure = "tpr", x.measure = "fpr")
+#計算AUC
+auc_IPO_Nor <- performance(pred_IPO_Nor, "auc")
+
+# Plot the ROC
+plot(perf_IPO_Nor, 
+     colorize=TRUE, 
+     main = "ROC curve_IPO_Nor", 
+     xlab = "Specificity(FPR)", 
+     ylab = "Sensitivity(TPR)")
+
+# Print AUC value
+auc_IPO_Nor@y.values[[1]] %>% 
+  kable(., caption = "AUC_IPO_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+## Logistic Regression ROTC
+
+```{r DataROTC_WithNormalization, echo = TRUE, message= FALSE, warning= FALSE}
+## Training and Test For IPO Variables
+TrainingData_ROTC_Nor <- GetTrainingAndTestingData(Data_ROTC_Nor, 0.8, 1, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+TestData_ROTC_Nor <- GetTrainingAndTestingData(Data_ROTC_Nor, 0.8, 0, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5,
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     # sampling = "rose", 
+                     savePredictions = T)
+
+## Use Training data to build logistic model, contains all variables
+Model_Logistic_ROTC_Nor <- train(form = IPOFail ~ ., 
+                                        data = TrainingData_ROTC_Nor,
+                                        trControl = ctrl, 
+                                        method = "glm",
+                                        family = "binomial",
+                                        metric = "ROC",
+                                        preProc=c("center", "scale"))
+
+summary(Model_Logistic_ROTC_Nor$finalModel)
+
+# 共線性檢測
+car::vif(Model_Logistic_ROTC_Nor$finalModel) %>%
+  as.data.frame() %>% 
+  kable(., caption = " VIF Test_AllVar_Normalization", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+## 利用 VIFToChooseVars 進行VIF 變數挑選
+VIF_AllVars_Nor <- VIFToChooseVars(TrainingData_ROTC_Nor, 5)
+
+## Variables removed by VIF
+VarRemovedByVIF_AllVar_Nor <- TrainingData_ROTC_Nor %>% 
+  select(!(VIF_AllVars_Nor$VariablesName)) %>% 
+  names(.) %>% 
+  .[-1] %>% 
+  as.data.frame()
+
+names(VarRemovedByVIF_AllVar_Nor) <- "Variable_Name"
+
+VarRemovedByVIF_AllVar_Nor %>% 
+  kable(., caption = " Variables removed by VIF_AllVar_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+## Select the Variables after testing from VIF
+TrainingData_ROTC_Nor_VIF <- TrainingData_ROTC_Nor %>% 
+  select("IPOFail", VIF_AllVars_Nor$VariablesName)
+
+TestData_ROTC_Nor_VIF <- TestData_ROTC_Nor  %>% 
+  select("IPOFail", VIF_AllVars_Nor$VariablesName)
+
+## logistic model, contain variables which testing from VIF 
+
+Model_Logistic_ROTC_Nor_VIF <- train(form = IPOFail ~ ., 
+                                            data = TrainingData_ROTC_Nor_VIF,
+                                            trControl = ctrl, 
+                                            method = "glm",
+                                            family = "binomial",
+                                            metric = "ROC",
+                                            preProc=c("center", "scale"))
+
+summary(Model_Logistic_ROTC_Nor_VIF$finalModel)
+
+## predict the result 
+
+Logis_pred_ROTC_Nor_WithoutStep <- predict.train(Model_Logistic_ROTC_Nor_VIF, 
+                                                   newdata = TestData_ROTC_Nor_VIF, 
+                                                   type = "raw")
+
+## confusionMatrix
+Conf_ROTC_Nor_WithoutStep <- caret::confusionMatrix(Logis_pred_ROTC_Nor_WithoutStep,
+                                               TestData_ROTC_Nor_VIF$IPOFail)
+
+Conf_ROTC_Nor_WithoutStep$table %>% 
+  kable(., caption = "ConfusionMatrix_ROTC_Nor_WithoutStep", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+### ROC Plot 
+Logistic_probability_ROTC_Nor <- predict.train(Model_Logistic_ROTC_Nor_VIF, 
+                                          newdata = TestData_ROTC_Nor_VIF, 
+                                          type = "prob") %>% 
+  pull(X1)
+  
+Logistic_pred_ROTC_Nor <- ROCR::prediction(Logistic_probability_ROTC_Nor, 
+                                          labels = TestData_ROTC_Nor_VIF$IPOFail)
+
+Logistic_perf_ROTC_Nor <- performance(Logistic_pred_ROTC_Nor, measure = "tpr", x.measure = "fpr")
+
+#計算AUC
+Logistic_auc_ROTC_Nor <- performance(Logistic_pred_ROTC_Nor, "auc")
+  
+# Plot the ROC
+plot(Logistic_perf_ROTC_Nor, 
+      colorize=TRUE, 
+      main = "ROC curve_ROTC_Nor", 
+      xlab = "Specificity(FPR)", 
+      ylab = "Sensitivity(TPR)")
+  
+# Print AUC value
+Logistic_auc_ROTC_Nor@y.values[[1]] %>% 
+    kable(., caption = "AUC_ROTC_Nor", align = "l") %>% 
+    kable_styling(full_width = TRUE)
+  
+AUC <- Logistic_auc_ROTC_Nor@y.values[[1]]
+
+```
+
+* 使用 標準化過的 ROTC 變數 且做 StepAIC
+
+```{r Data_ROTC_WithNormalization_StepAIC, echo = TRUE, message= FALSE, warning= FALSE}
+## glmStepAIC
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5,
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     # sampling = "rose", 
+                     savePredictions = T)
+
+Step_Logistic_ROTC_Nor <- train(form = IPOFail ~ .,
+                                       data = TrainingData_ROTC_Nor_VIF,
+                                       trControl = ctrl,
+                                       method = "glmStepAIC",
+                                       family = "binomial",
+                                       metric = "ROC",
+                                       importance = "permutation",
+                                       preProc=c("center", "scale"),
+                                       trace = FALSE)
+
+summary(Step_Logistic_ROTC_Nor)
+
+Step_Logistic_ROTC_Nor$finalModel
+
+Coe_Step_Logistic_ROTC_Nor <- summary(Step_Logistic_ROTC_Nor)
+# stargazer::stargazer(Coe_Step_Logistic_ROTC_Nor$coefficients,
+#           type = 'text',
+#           align = T,
+#           column.sep.width = "15pt",
+#           no.space = F,
+#           out = "LogisticSummary.html",
+#           title = "Logistic Regression Result",
+#           style = "qje")
+
+
+# 共線性檢測
+car::vif(Step_Logistic_ROTC_Nor$finalModel) %>%
+  data.frame() %>%
+  kable(., caption = "VIF Test_ Normalization_ROTC with StepAIC", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+PseudoR2(Step_Logistic_ROTC_Nor$finalModel, which = "Nagelkerke") %>%
+  data.frame() %>%
+  kable(., caption = "R Squared_Normalization_ROTC with StepAIC", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+VarImp_Logistic_ROTC_Nor <- varImp(Step_Logistic_ROTC_Nor$finalModel) %>%
+  mutate(ROTC_Nor_Variables = rownames(.)) %>%
+  arrange(-Overall) %>%
+  select(ROTC_Nor_Variables, Overall)
+
+ggplot(VarImp_Logistic_ROTC_Nor,
+       aes(x=reorder(ROTC_Nor_Variables, Overall), y=Overall, fill=Overall))+
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Variable Importance")+
+  xlab("")+
+  ggtitle("ROTC_Nor Variables Importance by siginificant level")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+
+## predict the result
+
+Logis_pred_ROTC_Nor <- predict.train(Step_Logistic_ROTC_Nor,
+                                            newdata = TestData_ROTC_Nor_VIF,
+                                            type = "raw")
+
+## confusionMatrix
+Conf_ROTC_Nor <- caret::confusionMatrix(Logis_pred_ROTC_Nor,
+                                               TestData_ROTC_Nor_VIF$IPOFail)
+
+Conf_ROTC_Nor$table %>%
+  kable(., caption = "ConfusionMatrix_ROTC_Nor", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+### ROC Plot
+Logis_probability_ROTC_Nor <- predict(Step_Logistic_ROTC_Nor,
+                                             newdata = TestData_ROTC_Nor_VIF,
+                                             type = 'prob') %>%
+  pull(X1)
+
+pred_ROTC_Nor <- ROCR::prediction(Logis_probability_ROTC_Nor,
+                                         labels = TestData_ROTC_Nor_VIF$IPOFail)
+perf_ROTC_Nor <- performance(pred_ROTC_Nor,
+                                    measure = "tpr",
+                                    x.measure = "fpr")
+#計算AUC
+auc_ROTC_Nor <- performance(pred_ROTC_Nor, "auc")
+
+# Plot the ROC
+plot(perf_ROTC_Nor,
+     colorize=TRUE,
+     main = "ROC curve_ROTC_Nor",
+     xlab = "Specificity(FPR)",
+     ylab = "Sensitivity(TPR)")
+
+# Print AUC value
+auc_ROTC_Nor@y.values[[1]] %>%
+  kable(., caption = "AUC_ROTC_Nor", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```
+
+
+
+## Logistic Regression IPO+ROTC
+** 丟入上面兩個模型之顯著變數
+
+```{r IPO與ROTC的顯著變數}
+## IPO 的顯著變數
+IPO_SignificantVars <- Coe_Step_Logistic_IPO_Nor$terms %>% 
+  attr(., "term.labels")
+# 把因為跑迴歸自動變dummy 的名稱改回來
+IPO_SignificantVars[c(7, 8)] <- c("ElectricOrNot", "Big4Natl")
+
+## ROTC 的顯著變數
+ROTC_SignificantVars <- Coe_Step_Logistic_ROTC_Nor$terms %>% 
+  attr(., "term.labels")
+# 把因為跑迴歸自動變dummy 的名稱改回來
+ROTC_SignificantVars[2] <- "Dividend_Dummy" 
+
+# IPO_SignificantVars <- names(Data_IPO_Nor)[-c(1, 2)]
+
+```
+
+```{r DataAllVariables_WithNormalization, echo = TRUE, message= FALSE, warning= FALSE}
+Data_IPOAndROTC_Sig_Nor <- Data_AllVariable_Nor %>% 
+  .[, .SD, .SDcols = c("Firms", "IPOFail", ROTC_SignificantVars, IPO_SignificantVars)]
+
+## Training and Test For IPO Variables
+TrainingData_AllVariable_Nor <- GetTrainingAndTestingData(Data_IPOAndROTC_Sig_Nor, 0.8, 1, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+TestData_AllVariable_Nor <- GetTrainingAndTestingData(Data_IPOAndROTC_Sig_Nor, 0.8, 0, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     # sampling = "rose", 
+                     savePredictions = T)
+
+## Use Training data to build logistic model, contains all variables
+Model_Logistic_AllVariable_Nor <- train(form = IPOFail ~ ., 
+                                        data = TrainingData_AllVariable_Nor,
+                                        trControl = ctrl, 
+                                        method = "glm",
+                                        family = "binomial",
+                                        metric = "ROC",
+                                        preProc=c("center", "scale"))
+
+summary(Model_Logistic_AllVariable_Nor$finalModel)
+
+# 共線性檢測
+car::vif(Model_Logistic_AllVariable_Nor$finalModel) %>%
+  as.data.frame() %>% 
+  kable(., caption = " VIF Test_AllVar_Normalization", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+## 利用 VIFToChooseVars 進行VIF 變數挑選
+VIF_AllVars_Nor <- VIFToChooseVars(TrainingData_AllVariable_Nor, 5)
+
+## Variables removed by VIF
+VarRemovedByVIF_AllVar_Nor <- TrainingData_AllVariable_Nor %>% 
+  select(!(VIF_AllVars_Nor$VariablesName)) %>% 
+  names(.) %>% 
+  .[-1] %>% 
+  as.data.frame()
+
+names(VarRemovedByVIF_AllVar_Nor) <- "Variable_Name"
+
+VarRemovedByVIF_AllVar_Nor %>% 
+  kable(., caption = " Variables removed by VIF_AllVar_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+## Select the Variables after testing from VIF
+TrainingData_AllVariable_Nor_VIF <- TrainingData_AllVariable_Nor %>% 
+  select("IPOFail", VIF_AllVars_Nor$VariablesName)
+
+TestData_AllVariable_Nor_VIF <- TestData_AllVariable_Nor  %>% 
+  select("IPOFail", VIF_AllVars_Nor$VariablesName)
+
+## logistic model, contain variables which testing from VIF 
+
+Model_Logistic_AllVariable_Nor_VIF <- train(form = IPOFail ~ ., 
+                                            data = TrainingData_AllVariable_Nor_VIF,
+                                            trControl = ctrl, 
+                                            method = "glm",
+                                            family = "binomial",
+                                            metric = "ROC",
+                                            preProc=c("center", "scale"))
+
+summary(Model_Logistic_AllVariable_Nor_VIF$finalModel)
+
+## IPO+ROTC Kfold Means ROC
+Logistic_KfoldROC_AllVars <- Model_Logistic_AllVariable_Nor_VIF$resample
+mean(Logistic_KfoldROC_AllVars$ROC)
+sd(Logistic_KfoldROC_AllVars$ROC)
+
+write.csv(Logistic_KfoldROC_AllVars, file = "Output/Logistic_KfoldROC_AllVars_100.csv")
+
+# stargazer
+Coe_Logistic_AllVariable_Nor <- summary(Model_Logistic_AllVariable_Nor_VIF)
+stargazer::stargazer(Coe_Logistic_AllVariable_Nor$coefficients,
+          type = 'text',
+          align = T,
+          column.sep.width = "15pt",
+          no.space = F,
+          out = "Output/LogisticSummary_100.html",
+          title = "Logistic Regression Result",
+          style = "qje")
+
+## R squared 
+PseudoR2(Model_Logistic_AllVariable_Nor_VIF$finalModel, which = "Nagelkerke") %>%
+  data.frame() %>%
+  kable(., caption = "R Squared_Normalization_AllVariables", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+## predict the result 
+
+Logis_pred_AllVar_Nor_WithoutStep <- predict.train(Model_Logistic_AllVariable_Nor_VIF, 
+                                                   newdata = TestData_AllVariable_Nor_VIF, 
+                                                   type = "raw")
+
+## confusionMatrix
+Conf_AllVar_Nor_WithoutStep <- caret::confusionMatrix(Logis_pred_AllVar_Nor_WithoutStep,
+                                               TestData_AllVariable_Nor_VIF$IPOFail)
+
+Conf_AllVar_Nor_WithoutStep$table %>% 
+  kable(., caption = "ConfusionMatrix_AllVar_Nor_WithoutStep", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+### ROC Plot 
+Logistic_probability_All_Nor <- predict.train(Model_Logistic_AllVariable_Nor_VIF, 
+                                          newdata = TestData_AllVariable_Nor_VIF, 
+                                          type = "prob") %>% 
+  pull(X1)
+  
+Logistic_pred_All_Nor <- ROCR::prediction(Logistic_probability_All_Nor, 
+                                          labels = TestData_AllVariable_Nor_VIF$IPOFail)
+
+Logistic_perf_All_Nor <- performance(Logistic_pred_All_Nor, measure = "tpr", x.measure = "fpr")
+
+#計算AUC
+Logistic_auc_All_Nor <- performance(Logistic_pred_All_Nor, "auc")
+  
+# Plot the ROC
+plot(Logistic_perf_All_Nor, 
+      colorize=TRUE, 
+      main = "ROC curve_All_Nor", 
+      xlab = "Specificity(FPR)", 
+      ylab = "Sensitivity(TPR)")
+  
+# Print AUC value
+Logistic_auc_All_Nor@y.values[[1]] %>% 
+    kable(., caption = "AUC_All_Nor", align = "l") %>% 
+    kable_styling(full_width = TRUE)
+  
+AUC <- Logistic_auc_All_Nor@y.values[[1]]
+
+```
+
+```{r DataAllVariables_WithNormalization_StepAIC, echo = TRUE, message= FALSE, warning= FALSE}
+## glmStepAIC
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     # sampling = "rose", 
+                     savePredictions = T)
+
+Step_Logistic_AllVariable_Nor <- train(form = IPOFail ~ .,
+                                       data = TrainingData_AllVariable_Nor_VIF,
+                                       trControl = ctrl,
+                                       method = "glmStepAIC",
+                                       family = "binomial",
+                                       metric = "ROC",
+                                       importance = "permutation",
+                                       preProc=c("center", "scale"),
+                                       trace = FALSE)
+
+summary(Step_Logistic_AllVariable_Nor)
+
+Step_Logistic_AllVariable_Nor$finalModel
+
+## IPO+ROTC Kfold Means ROC
+Logistic_KfoldROC_AllVars_Step <- Step_Logistic_AllVariable_Nor$resample
+mean(Logistic_KfoldROC_AllVars_Step$ROC)
+sd(Logistic_KfoldROC_AllVars_Step$ROC)
+
+write.csv(Logistic_KfoldROC_AllVars_Step, file = "Output/Logistic_KfoldROC_AllVars_Step_100.csv")
+
+Coe_Step_Logistic_AllVariable_Nor <- summary(Step_Logistic_AllVariable_Nor)
+stargazer::stargazer(Coe_Step_Logistic_AllVariable_Nor$coefficients,
+          type = 'text',
+          align = T,
+          column.sep.width = "15pt",
+          no.space = F,
+          out = "Output/LogisticSummary_step_100.html",
+          title = "Logistic Regression Result",
+          style = "qje")
+
+
+# 共線性檢測
+car::vif(Step_Logistic_AllVariable_Nor$finalModel) %>%
+  data.frame() %>%
+  kable(., caption = "VIF Test_ Normalization_AllVariables with StepAIC", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+PseudoR2(Step_Logistic_AllVariable_Nor$finalModel, which = "Nagelkerke") %>%
+  data.frame() %>%
+  kable(., caption = "R Squared_Normalization_AllVariables with StepAIC", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+VarImp_Logistic_AllVariable_Nor <- varImp(Step_Logistic_AllVariable_Nor$finalModel) %>%
+  mutate(AllVar_Nor_Variables = rownames(.)) %>%
+  arrange(-Overall) %>%
+  select(AllVar_Nor_Variables, Overall)
+
+ggplot(VarImp_Logistic_AllVariable_Nor,
+       aes(x=reorder(AllVar_Nor_Variables, Overall), y=Overall, fill=Overall))+
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Variable Importance")+
+  xlab("")+
+  ggtitle("AllVar_Nor Variables Importance by siginificant level")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+
+## predict the result
+
+Logis_pred_AllVariable_Nor <- predict.train(Step_Logistic_AllVariable_Nor,
+                                            newdata = TestData_AllVariable_Nor_VIF,
+                                            type = "raw")
+
+## confusionMatrix
+Conf_AllVariable_Nor <- caret::confusionMatrix(Logis_pred_AllVariable_Nor,
+                                               TestData_AllVariable_Nor_VIF$IPOFail)
+
+Conf_AllVariable_Nor$table %>%
+  kable(., caption = "ConfusionMatrix_AllVariable_Nor", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+### ROC Plot
+Logis_probability_AllVariable_Nor <- predict(Step_Logistic_AllVariable_Nor,
+                                             newdata = TestData_AllVariable_Nor_VIF,
+                                             type = 'prob') %>%
+  pull(X1)
+
+pred_AllVariable_Nor <- ROCR::prediction(Logis_probability_AllVariable_Nor,
+                                         labels = TestData_AllVariable_Nor_VIF$IPOFail)
+perf_AllVariable_Nor <- performance(pred_AllVariable_Nor,
+                                    measure = "tpr",
+                                    x.measure = "fpr")
+#計算AUC
+auc_AllVariable_Nor <- performance(pred_AllVariable_Nor, "auc")
+
+# Plot the ROC
+plot(perf_AllVariable_Nor,
+     colorize=TRUE,
+     main = "ROC curve_AllVariable_Nor",
+     xlab = "Specificity(FPR)",
+     ylab = "Sensitivity(TPR)")
+
+# Print AUC value
+auc_AllVariable_Nor@y.values[[1]] %>%
+  kable(., caption = "AUC_AllVariable_Nor", align = "l") %>%
+  kable_styling(full_width = TRUE)
+
+```

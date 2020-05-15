@@ -1,0 +1,544 @@
+---
+title: "Variable_Summary"
+author: "Bo Dun Hsu"
+date: "2020/4/25"
+output: 
+  html_document :
+    toc : TRUE
+    toc_depth : 2
+    toc_float :
+      collapsed : TRUE
+      smooth_scroll : TRUE
+    number_selection : TRUE 
+    code_folding : hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/USER/Desktop/FightForMasterOfDegree")
+```
+
+```{r echo = FALSE, include = FALSE, message = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(readxl)
+library(lubridate)
+library(PerformanceAnalytics)
+library(ggrepel)
+library(data.table)
+library(knitr)
+library(plyr)
+# library(rmdWidgets)
+library(kableExtra)
+library(formattable)
+library(dplyr)
+
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(randomForestExplainer)
+library(purrr)
+library(ROCR)
+library(corrplot)
+library(DescTools) # Print the R squared in Glm
+library(car) # Vif 共線性檢驗
+library(caret)
+library(e1071)
+library(ranger)
+library(lattice)
+library(DMwR) # SMOTE
+library(ROSE) # ROSE 模擬數據
+library(pROC)
+
+
+```
+
+```{r echo = TRUE}
+load("Data/FinalData_IPO.RData")
+load("Data/FinalData_FS.RData")
+load("Data/FinalData_ROTCTrading.RData")
+load("Data/ListFirm.RData") # 最後整理出的所有公司清單
+
+FinalData_Basic <- FinalData_FS %>% 
+  .[, .SD, .SDcols = c(1:8)]
+
+FinalData_FS <- FinalData_FS %>% 
+  .[, .SD, .SDcols = -c(2:8)]
+
+JoinList <- list(FinalData_FS, FinalData_IPO, FinalData_ROTCTrading)
+
+FinalDataWithAllVariable <- plyr::join_all(JoinList, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+
+
+```
+
+```{r RemoveTheVariables(High Corr), echo = TRUE}
+FactorCols_FS <- c("Dividend_Dummy", "NegativeNetIncome")
+Data_FS <- FinalData_FS %>% 
+  .[, (FactorCols_FS):= lapply(.SD, factor), .SDcols = FactorCols_FS]
+
+FactorCols_IPO <- c("IPOFail", "Market", "ElectricOrNot", "Big4Natl", 
+                    "NumIPOSign", "VCBack")
+Data_IPO <- FinalData_IPO %>% 
+  .[, .SD, .SDcols = -c("OtherIPOFirstDayReturn", "UnderwrittenAmount_1000")] %>% 
+  .[, (FactorCols_IPO):= lapply(.SD, factor), .SDcols = FactorCols_IPO]
+
+Data_ROTCTrading <- FinalData_ROTCTrading %>% 
+  .[, .SD, .SDcols = -c("ZeroReturnDaysRatio")]
+
+## 建立包含所有變數的data
+JoinList2 <- list(Data_FS, Data_IPO, Data_ROTCTrading)
+
+Data_AllVariable <- plyr::join_all(JoinList2, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+# save(Data_AllVariable, file = "Data/Data_AllVariable.RData")
+
+## 建立僅包含興櫃變數的data 
+DataWithIPOFail <- Data_IPO %>% 
+  .[, .SD, .SDcols = c("Firms", "IPOFail")]
+
+JoinList3 <- list(DataWithIPOFail, Data_FS, Data_ROTCTrading)
+
+Data_ROTC <- plyr::join_all(JoinList3, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+```
+
+## IPO 特性變數
+
+```{r echo = TRUE}
+# 顯示出 FinalData_IPO 所有結果，並以滾動捲軸呈現
+FinalData_IPO %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "1000px", height = "500px")
+```
+
+
+```{r echo = TRUE}
+## 數值變數
+NumInData_IPO <- Data_IPO %>% 
+  select_if(., is.numeric) %>% 
+  cbind(Data_IPO[, 2], .)
+
+# 計算需要用到的變數的summary 且有區分IPO是否失敗
+GetSummaryGroupByIPOFailAndTotal <- function(Data, Variable){
+  
+  Summary_Total <- Data %>% 
+    .[, .SD, .SDcols = c("IPOFail", Variable)] %>% 
+    psych::describe(.) %>% 
+    setDT() %>% 
+    .[, Type := "Total"] %>% 
+    .[, .SD, .SDcols = c("Type", "n", "mean", "median", "min", "max", 
+                         "range", "skew", "kurtosis")] %>% 
+    .[2]
+  
+  IPO_NoFail_Summary <- Data %>%
+    .[, .SD, .SDcols = c("IPOFail", Variable)] %>% 
+    psych::describeBy(., group = .$IPOFail) %>% 
+    .[[1]] %>% 
+    setDT() %>% 
+    .[, Type := "IPO_NoFail"] %>% 
+    .[, .SD, .SDcols = c("Type", "n", "mean", "median", "min", "max", 
+                         "range", "skew", "kurtosis")] %>% 
+    .[2]
+
+  IPO_Fail_Summary <- Data %>%
+    .[, .SD, .SDcols = c("IPOFail", Variable)] %>% 
+    psych::describeBy(., group = .$IPOFail) %>% 
+    .[[2]] %>% 
+    setDT() %>% 
+    .[, Type := "IPO_Fail"] %>% 
+    .[, .SD, .SDcols = c("Type", "n", "mean", "median", "min", "max", 
+                         "range", "skew", "kurtosis")] %>% 
+    .[2]
+
+  Summary <- Summary_Total %>% 
+    rbind(., IPO_NoFail_Summary, IPO_Fail_Summary) %>% 
+    setDT() %>% 
+    .[, Variable := Variable] %>% 
+    select("Variable", everything())
+    
+
+  return(Summary)
+}
+
+VariableName_IPO <- names(NumInData_IPO)[-1]
+
+SummaryDataIPO_Num_Data <- lapply(VariableName_IPO, 
+       function(x) GetSummaryGroupByIPOFailAndTotal(NumInData_IPO, x)) %>% 
+  rbindlist()
+
+SummaryDataIPO_Num <- SummaryDataIPO_Num_Data%>% 
+  .[Type != "Total"] %>% 
+  .[, .SD, .SDcols = c("Variable", "Type", "mean")] %>% 
+  dcast(., Variable ~ Type, value.var =  "mean") %>% 
+  .[, Times := IPO_NoFail / IPO_Fail] %>% 
+  .[, Times_Adj := ifelse(Times < 1, 1/Times, Times)] %>% 
+  .[, -4] %>% 
+  .[order(-Times_Adj)]
+
+SummaryDataIPO_Num %>% 
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "1000px", height = "500px")
+
+```
+
+```{r echo = TRUE}
+## Dummy Variables
+FactorInData_IPO <- Data_IPO %>% 
+  select_if(., is.factor)
+
+## Market
+Summary_Market_ToPlot <- FactorInData_IPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "Market")] %>%
+  .[, table(Market), by = "IPOFail"] %>% 
+  .[, Market := c("TSE", "OTC", "TSE", "OTC")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "Market", "Num", "Percent")]
+
+# 畫圖顯示 Market
+Summary_Market_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = Market), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分 Market")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+
+## EleOrNot
+Summary_ElectricOrNot_ToPlot <- FactorInData_IPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "ElectricOrNot")] %>%
+  .[, table(ElectricOrNot), by = "IPOFail"] %>% 
+  .[, ElectricOrNot := c("Not_Ele", "Ele", "Not_Ele", "Ele")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "ElectricOrNot", "Num", "Percent")]
+
+# 畫圖顯示 EleOrNot
+Summary_ElectricOrNot_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = ElectricOrNot), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分 ElectricOrNot")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+## Big4Natl
+Summary_Big4_ToPlot <- FactorInData_IPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "Big4Natl")] %>%
+  .[, table(Big4Natl), by = "IPOFail"] %>% 
+  .[, Big4Natl := c("Not_Big4Natl", "Big4Natl", "Not_Big4Natl", "Big4Natl")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "Big4Natl", "Num", "Percent")]
+
+# 畫圖顯示 Big4Natl
+Summary_Big4_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = Big4Natl), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分 Big4Natl")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+## NUM_IPO
+Summary_NumIPO_ToPlot <- FactorInData_IPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NumIPOSign")] %>%
+  .[, table(NumIPOSign), by = "IPOFail"] %>% 
+  .[, NumIPOSign := c("Cold Season", "Hot Season",
+                      "Cold Season", "Hot Season")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NumIPOSign", "Num", "Percent")]
+
+# 畫圖顯示 NumIPO
+Summary_NumIPO_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = NumIPOSign), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分 NumIPO")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+## VC 
+Summary_VCBack_ToPlot <- FactorInData_IPO %>% 
+  .[, .SD, .SDcols = c("IPOFail", "VCBack")] %>%
+  .[, table(VCBack), by = "IPOFail"] %>% 
+  .[, VCBack := c("WithoutVC", "VC", "WithoutVC", "VC")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "VCBack", "Num", "Percent")]
+
+# 畫圖顯示 VC
+Summary_VCBack_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = VCBack), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分VCBack")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+```
+
+
+## 興櫃期間財務變數
+
+```{r echo = TRUE}
+# 顯示出 FinalData_FS 所有結果，並以滾動捲軸呈現
+FinalData_FS %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "1000px", height = "500px")
+```
+
+```{r echo = TRUE}
+Data_FS_WithIPOFail <- Data_FS %>% 
+  left_join(., Data_IPO %>% .[, .SD, .SDcols = c("Firms", "IPOFail")], by = "Firms") %>% 
+  select(., "IPOFail", everything()) %>% 
+  setDT()
+
+## 數值變數
+NumInData_FS <-  Data_FS_WithIPOFail %>% 
+  select_if(., is.numeric) %>% 
+  cbind(Data_FS_WithIPOFail[, 1], .) %>% 
+  setDT()
+
+VariableName_FS <- names(NumInData_FS)[-1]
+
+SummaryDataFS_Num_Data <- lapply(VariableName_FS, 
+       function(x) GetSummaryGroupByIPOFailAndTotal(NumInData_FS, x)) %>% 
+  rbindlist()
+
+SummaryDataFS_Num <- SummaryDataFS_Num_Data%>% 
+  .[Type != "Total"] %>% 
+  .[, .SD, .SDcols = c("Variable", "Type", "mean")] %>% 
+  dcast(., Variable ~ Type, value.var =  "mean") %>% 
+  .[, Times := IPO_NoFail / IPO_Fail] %>% 
+  .[, Times_Adj := ifelse(Times < 1, 1/Times, Times)] %>% 
+  .[, -4] %>% 
+  .[order(-Times_Adj)]
+
+SummaryDataFS_Num %>% 
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "1000px", height = "500px")
+
+```
+
+```{r echo = TRUE}
+## Dummy Variables
+FactorInData_FS <- Data_FS_WithIPOFail %>% 
+  select_if(., is.factor)
+
+## Dividend_Dummy
+Summary_Dividend_Dummy_ToPlot <- FactorInData_FS %>% 
+  .[, .SD, .SDcols = c("IPOFail", "Dividend_Dummy")] %>%
+  .[, table(Dividend_Dummy), by = "IPOFail"] %>% 
+  .[, DividendOrNot := c("No_Dividend", "Dividend", "No_Dividend", "Dividend")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "DividendOrNot", "Num", "Percent")]
+
+# 畫圖顯示 Dividend_Dummy
+Summary_Dividend_Dummy_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = DividendOrNot), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分 是否發放股利")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+## NegativeNetIncome
+Summary_NegativeNetIncome_ToPlot <- FactorInData_FS %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NegativeNetIncome")] %>%
+  .[, table(NegativeNetIncome), by = "IPOFail"] %>% 
+  .[, NegativeNetIncome := c("Positive_NetIncome", "Negative_NetIncome", 
+                             "Positive_NetIncome", "Negative_NetIncome")] %>% 
+  .[, Percent := round((`V1` / sum(V1))*100, 0), 
+    by = "IPOFail"] %>% 
+  dplyr::rename("Num" = "V1") %>% 
+  .[, .SD, .SDcols = c("IPOFail", "NegativeNetIncome", "Num", "Percent")]
+
+# 畫圖顯示 NegativeNetIncome
+Summary_NegativeNetIncome_ToPlot %>% 
+  .[, `:=` (IPOFail = as.character(IPOFail),
+            Percent = as.numeric(Percent))] %>% 
+  ggplot(., aes(x = IPOFail, y = Percent)) +
+  geom_bar(aes(x = IPOFail, y = Percent, fill = NegativeNetIncome), 
+           stat = "identity", position = "dodge") +
+  geom_label_repel(aes(x = IPOFail, y = Percent, label = Percent)) + 
+  ggtitle("以IPO失敗與否區分 是否有負的NI")+
+  ylab("Percent (%)")+
+  theme_classic() +
+  theme(axis.text.x = element_text(vjust = 0.5, angle = 45),
+        plot.background  = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.background = element_rect(fill = "white"))
+
+
+```
+
+
+## 興櫃期間交易變數
+
+```{r echo = TRUE}
+# 顯示出 FinalData_ROTCTrading 所有結果，並以滾動捲軸呈現
+FinalData_ROTCTrading %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "1000px", height = "500px")
+
+```
+
+```{r echo = TRUE}
+Data_ROTCTrading_WithIPOFail <- Data_ROTCTrading %>% 
+  left_join(., Data_IPO %>% .[, .SD, .SDcols = c("Firms", "IPOFail")], by = "Firms") %>% 
+  select(., "IPOFail", everything()) %>% 
+  setDT()
+
+## 數值變數
+NumInData_ROTCTrading <-  Data_ROTCTrading_WithIPOFail %>% 
+  select_if(., is.numeric) %>% 
+  cbind(Data_ROTCTrading_WithIPOFail[, 1], .) %>% 
+  setDT()
+
+VariableName_ROTCTrading <- names(NumInData_ROTCTrading)[-1]
+
+SummaryDataROTCTrading_Num_Data <- lapply(VariableName_ROTCTrading, 
+       function(x) GetSummaryGroupByIPOFailAndTotal(NumInData_ROTCTrading, x)) %>% 
+  rbindlist()
+
+SummaryDataROTCTrading_Num <- SummaryDataROTCTrading_Num_Data%>% 
+  .[Type != "Total"] %>% 
+  .[, .SD, .SDcols = c("Variable", "Type", "median")] %>% 
+  dcast(., Variable ~ Type, value.var =  "median") %>% 
+  .[, Times := IPO_NoFail / IPO_Fail] %>% 
+  .[, Times_Adj := ifelse(Times < 1, 1/Times, Times)] %>% 
+  .[, -4] %>% 
+  .[order(-Times_Adj)]
+
+SummaryDataROTCTrading_Num %>% 
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "1000px", height = "250px")
+
+```
+
+```{r echo = TRUE}
+# 計算一下IPO失敗公司 失敗當下之市值。
+load("Data/ListFirm.RData") # 最後整理出的所有公司清單
+
+FailFirmsMarketValue_Data <- read_xlsx("Data/FailFirmsMarketValue.xlsx") %>% 
+  dplyr::rename(., "公司簡稱" = "證券代碼") %>% 
+  left_join(., 
+            ListFirm %>% 
+              .[, .SD, .SDcols = c("公司簡稱", "IPOFail", "IPOFailDate", "Delist", "FCDInFiveYear")], 
+            by = "公司簡稱") %>% 
+  setDT() %>% 
+  .[order(`公司簡稱`)]
+
+## DelistFirms 2家
+FailFirmsMarketValue_Delist <- FailFirmsMarketValue_Data %>% 
+  .[Delist == 1 & FCDInFiveYear != 1] %>% 
+  .[, tail(.SD, 1), by = "公司簡稱"]
+
+## DelistFirms and FCD 9家
+FailFirmsMarketValue_DelistFCD <- FailFirmsMarketValue_Data %>% 
+  .[Delist == 1 & FCDInFiveYear == 1] %>% 
+  .[`年月日` == `IPOFailDate`]
+
+## FCD 30家
+FailFirmsMarketValue_FCD <- FailFirmsMarketValue_Data %>% 
+  .[FCDInFiveYear == 1 & Delist != 1] %>% 
+  .[`年月日` == `IPOFailDate`]
+
+## Final 
+FailFirmsMarketValue <- rbind(FailFirmsMarketValue_Delist, 
+                              FailFirmsMarketValue_DelistFCD, 
+                              FailFirmsMarketValue_FCD)
+
+FailFirmsTotalMarketValue <- FailFirmsMarketValue$`市值(百萬元)` %>% sum()
+
+IPO_Data <- read_xlsx("Data/IPO_Data.xlsx") %>% 
+  dplyr::rename("公司簡稱" = "公司") %>% 
+  setDT() %>% 
+  .[`公司簡稱` %in% ListFirm$`公司簡稱`]
+
+MarketValueOnIPODay <- IPO_Data %>% 
+  left_join(., ListFirm %>% .[, .SD, .SDcols = c("公司簡稱", "Market", "IPOFail")], 
+            by = "公司簡稱") %>% 
+  setDT() %>% 
+  pull(`上市日市值(百萬元)`) %>% 
+  sum()
+
+(FailFirmsTotalMarketValue / MarketValueOnIPODay) *100
+
+
+```
+
+
+
+
+

@@ -1,0 +1,734 @@
+---
+title: "RandomForest"
+author: "Rolando"
+date: "3/30/2020"
+output: 
+  html_document :
+    toc : TRUE
+    toc_depth : 2
+    toc_float :
+      collapsed : TRUE
+      smooth_scroll : TRUE
+    number_selection : TRUE 
+    code_folding : hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/USER/Desktop/FightForMasterOfDegree")
+```
+
+```{r echo = FALSE, include = FALSE, message = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(readxl)
+library(lubridate)
+library(PerformanceAnalytics)
+library(ggrepel)
+library(data.table)
+library(knitr)
+library(plyr)
+# library(rmdWidgets)
+library(kableExtra)
+library(formattable)
+library(dplyr)
+
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(randomForestExplainer)
+library(purrr)
+library(ROCR)
+library(corrplot)
+library(DescTools) # Print the R squared in Glm
+library(car) # Vif 共線性檢驗
+library(caret)
+library(e1071)
+library(ranger)
+library(lattice)
+library(DMwR) # SMOTE
+library(ROSE) # ROSE 模擬數據
+library(pROC)
+
+
+```
+
+## Import Data
+
+```{r echo = TRUE}
+load("Data/FinalData_IPO.RData")
+load("Data/FinalData_FS.RData")
+load("Data/FinalData_ROTCTrading.RData")
+
+FinalData_Basic <- FinalData_FS %>% 
+  .[, .SD, .SDcols = c(1:8)]
+
+FinalData_FS <- FinalData_FS %>% 
+  .[, .SD, .SDcols = -c(2:8)]
+
+JoinList <- list(FinalData_FS, FinalData_IPO, FinalData_ROTCTrading)
+
+FinalDataWithAllVariable <- plyr::join_all(JoinList, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+# 顯示出 FinalData_IPO 所有結果，並以滾動捲軸呈現
+FinalData_IPO %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 顯示出 FinalData_FS 所有結果，並以滾動捲軸呈現
+FinalData_FS %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+# 顯示出 FinalData_ROTCTrading 所有結果，並以滾動捲軸呈現
+FinalData_ROTCTrading %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+
+```
+
+## 相關係數檢驗
+
+* 透過 **corrplot** print 出所有變數的相關係數矩陣，另外透過 GetHighCorr_Result 設定需導入的資料集以及想要得相關係數等級，即可製作出高相關係數資料表。
+
+* 使用 GetHighCorr_Result時，需先確保所有變數均為要判別相關係數使用，不可有不需計算的變數，EX: 公司簡稱。
+
+* 計算各變數間的相關係數，並挑出相關係數高於0.75的變數。
+
+1. SD_MarketModelResidual、SD_Return250DaysAfterIPO 除了互相具有高度相關外(99.7 %)，也各自與 FirstDayReturn(%) 有非常高度的相關( 96% )。
+
+2. ZeroTradingDaysRatio 與 ZeroReturnDaysRatio 具有非常高度的相關 (97.36%)，但卻沒有與AmihudRatio 有高度相關的關係。
+
+3. NumIPO 與 EWU 分別以IPO前四季之IPO數量與平均Underpricingy做Benchmark來代表IPO發行冷熱季，但從相關係數中並沒有看到有高度相關之結果。
+
+* 變數調整：
+
+1. 由下表可以得知，**SD_MarketModelResidual、SD_Return250DaysAfterIPO、FirstDayReturn** 關連性極高，但還是選擇先將三者都丟入模型，並於最後檢測VIF看是否需要刪除。
+
+2. **ZeroReturnDaysRatio，ZeroTradingDaysRatio** 最終選擇ZeroTradingDaysRatio。
+
+3. **OtherIPOInitialReturn、OtherIPOFirstDayReturn** 最終選擇OtherIPOInitialReturn。
+
+4. **研究發展費用率_ToMarket、營業費用率_ToMarket**，雖然相關係數到82%，但還是選擇先將二者都丟入模型，並於最後檢測VIF看是否需要刪除。
+
+5. **"承銷價格(元)、承銷金額.千元、總承銷股數.千股.** 由於上市日市值.百萬元可由其他兩者推出，因此選擇刪除 上市日市值.百萬元。
+
+6. **Dividend_Dummy、股利支付率_ToMarket**，雖然相關係數到77%，但還是選擇先將二者都丟入模型，並於最後檢測VIF看是否需要刪除。
+
+* 需刪除變數：
+
+1. ZeroReturnDaysRatio
+
+2. OtherIPOFirstDayReturn
+
+3. 承銷金額.千元
+
+```{r 相關係數檢驗, echo = TRUE}
+
+GetHighCorr_Result <- function(Data, CorrLevel){
+  
+  ## 建立相關係數Data
+  CorrData <- cor(Data) %>% 
+    as.data.table() %>% 
+    .[, Variable := names(Data)] %>% 
+    dplyr::select(., "Variable", everything())
+  
+  ## Function 用於找出每一個變數的高相關係數關係變數
+  GetHighCorr <- function(Variable_Name){
+  
+  Data <- CorrData %>% 
+    .[, .SD, .SDcols = c("Variable", Variable_Name)] %>% 
+    .[abs(get(Variable_Name))>= CorrLevel] %>% 
+    .[, Variable2 := names(.)[2]] %>% 
+    setnames(., Variable_Name, "Corr") %>% 
+    .[, .SD, .SDcols = c("Variable", "Variable2", "Corr")]
+  
+  return(Data)
+    
+  }
+  
+  ## 利用迴圈針對每一個變數找到高相關係數關係並疊合
+  HighCorr_UnClean <- NULL
+  for (i in names(CorrData)[-1]) {
+    
+    Data <- GetHighCorr(i)
+    
+    if (nrow(Data) == 1) next
+    
+    HighCorr_UnClean <- rbind(HighCorr_UnClean, Data) %>% 
+      setDT() %>% 
+      .[Corr != 1]
+  }
+  
+  ## 去掉重複值
+  HighCorr <- HighCorr_UnClean %>% 
+  .[order(-Corr)] %>% 
+  .[, head(.SD, 1), by = "Corr"] %>% 
+  .[, .SD, .SDcols = c("Variable", "Variable2", "Corr")]
+  
+  return(HighCorr)
+  
+}
+
+HighCorr_AllVariable <- FinalDataWithAllVariable %>%
+  .[, -c(1, 2)] %>% 
+  GetHighCorr_Result(., 0.7)
+
+HighCorr_AllVariable %>% 
+  kable(., caption = "HighCorr_AllVariable", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+```
+
+## Remove the Variables (High Corr)
+
+* Remove the variable which have high corr with others.
+
+* 以 **Data_AllVariable** 作為最終data，得以導入Model中。
+
+* 以 **Data_IPO** 作為尚未考慮興櫃期間變數的資料集。
+
+```{r RemoveTheVariables(High Corr), echo = TRUE}
+FactorCols_FS <- c("Dividend_Dummy", "NegativeNetIncome")
+Data_FS <- FinalData_FS %>% 
+  .[, (FactorCols_FS):= lapply(.SD, factor), .SDcols = FactorCols_FS]
+
+FactorCols_IPO <- c("IPOFail", "Market", "ElectricOrNot", "Big4Natl", 
+                    "NumIPOSign", "VCBack")
+Data_IPO <- FinalData_IPO %>% 
+  .[, .SD, .SDcols = -c("OtherIPOFirstDayReturn", "UnderwrittenAmount_1000")] %>% 
+  .[, (FactorCols_IPO):= lapply(.SD, factor), .SDcols = FactorCols_IPO]
+
+Data_ROTCTrading <- FinalData_ROTCTrading %>% 
+  .[, .SD, .SDcols = -c("ZeroReturnDaysRatio")]
+
+## 建立包含所有變數的data
+JoinList2 <- list(Data_FS, Data_IPO, Data_ROTCTrading)
+
+Data_AllVariable <- plyr::join_all(JoinList2, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+# save(Data_AllVariable, file = "Data/Data_AllVariable.RData")
+
+## 建立僅包含興櫃變數的data 
+DataWithIPOFail <- Data_IPO %>% 
+  .[, .SD, .SDcols = c("Firms", "IPOFail")]
+
+JoinList3 <- list(DataWithIPOFail, Data_FS, Data_ROTCTrading)
+
+Data_ROTC <- plyr::join_all(JoinList3, by = "Firms", type = 'left', match = "all") %>% 
+  setDT() %>% 
+  dplyr::select(., "Firms", "IPOFail", everything())
+
+
+```
+
+## Normalization 
+
+* 利用 NormalizeFunciton 抓出非factor的變數並進行標準化。
+
+* 製作 Data_AllVariable_Nor、Data_IPO_Nor 作為已經標準化後的資料，並分成僅有IPO資料以及加入FS、ROTCTrading 的AllVariables資料。
+
+```{r Normalization, echo = TRUE}
+NormalizeFunciton <- function(Data){
+  
+  NeedToNormalize <- Filter(is.factor, Data) %>% names()
+
+  ## 以常態標準化方式將所有變數進行 標準化
+  Data_Nor <- Data %>% 
+    .[, .SD, .SDcols = -c("Firms", NeedToNormalize)] %>% 
+    scale(.) %>% 
+    as.data.table() %>% 
+    cbind(., Data %>% 
+    .[, .SD, .SDcols = c("Firms", NeedToNormalize)]) %>% 
+    dplyr::select(., "Firms", "IPOFail", everything())
+  
+  return(Data_Nor)
+}
+
+Data_AllVariable_Nor <- NormalizeFunciton(Data_AllVariable)
+
+Data_IPO_Nor <- NormalizeFunciton(Data_IPO)
+
+Data_ROTC_Nor <- NormalizeFunciton(Data_ROTC)
+
+## 滾動捲軸顯示 Data_AllVariable_Nor
+Data_AllVariable_Nor %>%
+  dplyr::select(everything()) %>%
+  kable("html", escape = F, align = "l") %>%
+  kable_styling("hover", full_width = T) %>% 
+  scroll_box(width = "800px", height = "500px")
+```
+
+## Get Training Data And Testing Data
+
+* 導入需要的資料，
+
+1. 設定 TrainingOrTest 引數，若 TrainingOrTest == 1，則回傳Training Data， 若為 0，則回傳 Testing Data。
+
+2. 設定 SampleLevel，決定要分多少比例的資料去Training，若設定為0.7，代表分出7成的資料進TrainingData。
+
+```{r TrainAndTest, echo = TRUE}
+
+GetTrainingAndTestingData <- function(Data, SampleLevel, TrainingOrTest, SeedNumber){
+  ## Seperate the y to One and Zero
+  Input_Ones <- Data %>% 
+    .[IPOFail == 1]
+  Input_Zeros <- Data %>% 
+    .[IPOFail == 0]
+ 
+  ## 挑選資料
+  set.seed(SeedNumber)
+  Input_Ones_Training_Row <- sample(1:nrow(Input_Ones), 
+                                    SampleLevel*nrow(Input_Ones))
+  Input_Zeros_Training_Row <- sample(1:nrow(Input_Zeros), 
+                                     SampleLevel*nrow(Input_Zeros))
+  
+  ## 建立 Training Data
+  Training_Ones <- Input_Ones[Input_Ones_Training_Row,]
+  Training_Zeros <- Input_Zeros[Input_Zeros_Training_Row,]
+  
+  TrainingData <- rbind(Training_Ones, Training_Zeros) %>% 
+    merTools:::shuffle()
+  
+  # 產生測試資料集
+  Test_Ones <- Input_Ones[-Input_Ones_Training_Row,]
+  Test_Zeros <- Input_Zeros[-Input_Zeros_Training_Row,]
+  
+  TestData <- rbind(Test_Ones, Test_Zeros) %>% 
+    merTools:::shuffle()
+  
+  if (TrainingOrTest == 1) {
+    
+    return(TrainingData)
+    
+  }else{
+    
+    return(TestData)
+    
+  }
+}
+
+```
+
+## RandomForest IPO_Nor
+
+* RF_KfoldROC_IPO_100.csv Kfold 一百次的結果，可以平均其ROC 作為模型預測效果。
+* RF_VariablesImportance_IPO_100.png 變數重要性
+
+
+```{r DataIPO_WithNormalization, echo = TRUE, message= FALSE, warning= FALSE}
+
+## Training and Test For IPO Variables
+TrainingData_IPO_Nor <- GetTrainingAndTestingData(Data_IPO_Nor, 0.8, 1, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                        labels = make.names(levels(IPOFail))))
+
+TestData_IPO_Nor <- GetTrainingAndTestingData(Data_IPO_Nor, 0.8, 0, 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                        labels = make.names(levels(IPOFail))))
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     sampling = "rose", 
+                     savePredictions = T)
+set.seed(6000)
+RF_IPO_Nor <- train(IPOFail ~ ., 
+                    data = TrainingData_IPO_Nor, 
+                    method = "ranger", 
+                    importance = "permutation", 
+                    trControl = ctrl,
+                    # tuneGrid = expand.grid(.mtry = 3,
+                    #                        .splitrule = "gini",
+                    #                        .min.node.size = c(20)),
+                    tuneLength = 7,
+                    preProc=c("center", "scale"),
+                    metric = "ROC")
+
+
+#plot(RF_IPO_Nor)
+RF_IPO_Nor$finalModel
+
+## IPO Kfold Means ROC
+KfoldROC_IPO <- RF_IPO_Nor$resample
+mean(KfoldROC_IPO$ROC)
+sd(KfoldROC_IPO$ROC)
+
+
+write.csv(KfoldROC_IPO, file = "Output/RF_KfoldROC_IPO_100.csv")
+
+plot(RF_IPO_Nor,type = c("o","g"))
+
+# Build the Varsiables Importantance table 
+VarImp_IPO_Nor <- varImp(RF_IPO_Nor)[[1]] %>% 
+  mutate(IPO_Nor_Variables = rownames(.)) %>% 
+  setDT() %>% 
+  .[, .SD, .SDcols = c("IPO_Nor_Variables", "Overall")] %>% 
+  .[order(-Overall)]
+
+write.csv(VarImp_IPO_Nor, file = "Output/RF_VarImp_IPO_Nor_100.csv")
+
+ggplot(VarImp_IPO_Nor[c(1:20), ], 
+       aes(x=reorder(IPO_Nor_Variables, Overall), y=Overall, fill=Overall))+ 
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Variable Importance")+
+      xlab("")+
+      ggtitle("Variables Importance IPO_Nor")+
+      guides(fill=F)+
+      scale_fill_gradient(low="red", high="blue")
+
+png("Output/Slides/RF_VariablesImportance_IPO_100.png", width = 8, height = 6, units = 'in', res = 300)
+ggplot(VarImp_IPO_Nor[c(1:20), ],
+       aes(x=reorder(IPO_Nor_Variables, Overall), y=Overall, fill=Overall))+
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Variable Importance")+
+      xlab("")+
+      ggtitle("Variables Importance IPO_Nor")+
+      guides(fill=F)+
+      scale_fill_gradient(low="red", high="blue")
+dev.off()
+
+## predict the result 
+RF_pred_IPO_Nor <- predict.train(RF_IPO_Nor, 
+                                 newdata = TestData_IPO_Nor[, -1], 
+                                 type = "raw")
+
+## confusionMatrix
+Conf_RF_IPO_Nor <- caret::confusionMatrix(RF_pred_IPO_Nor, TestData_IPO_Nor$IPOFail)
+
+Conf_RF_IPO_Nor$table %>% 
+  kable(., caption = "ConfusionMatrix_IPO_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+### ROC Plot 
+RF_probability_IPO_Nor <- predict.train(RF_IPO_Nor, 
+                                        newdata = TestData_IPO_Nor[, -1], 
+                                        type = "prob") %>% 
+  pull(X1)
+
+RF_pred_IPO_Nor <- ROCR::prediction(RF_probability_IPO_Nor, labels = TestData_IPO_Nor$IPOFail)
+RF_perf_IPO_Nor <- performance(RF_pred_IPO_Nor, measure = "tpr", x.measure = "fpr")
+#計算AUC
+RF_auc_IPO_Nor <- performance(RF_pred_IPO_Nor, "auc")
+
+# Plot the ROC
+plot(RF_perf_IPO_Nor, 
+     colorize=TRUE, 
+     main = "ROC curve_IPO_Nor", 
+     xlab = "Specificity(FPR)", 
+     ylab = "Sensitivity(TPR)")
+
+# Print AUC value
+RF_auc_IPO_Nor@y.values[[1]] %>% 
+  kable(., caption = "AUC_IPO_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+mean(KfoldROC_IPO$ROC) %>% 
+  kable(., caption = "CV_AUC_IPO_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+
+```
+
+## RandomForest ROTC_Nor 
+
+```{r DataROTC_WithNormalization, echo = TRUE, message= FALSE, warning= FALSE}
+
+## Training and Test For ROTC Variables
+TrainingData_ROTC_Nor <- GetTrainingAndTestingData(Data_ROTC_Nor, 0.8, 1, SeedNumber = 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+
+TestData_ROTC_Nor <- GetTrainingAndTestingData(Data_ROTC_Nor, 0.8, 0, SeedNumber = 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     sampling = "rose", 
+                     savePredictions = T)
+
+set.seed(6000)
+RF_ROTC_Nor <- train(IPOFail ~ ., 
+                        data = TrainingData_ROTC_Nor, 
+                        method = "ranger", 
+                        importance = "permutation", 
+                        trControl = ctrl,
+                        # tuneGrid = expand.grid(.mtry = 2:30, 
+                        #                        .splitrule = "gini",
+                        #                        .min.node.size = 1:10),
+                        tuneLength = 15,
+                        preProc=c("center", "scale"),
+                        metric = "ROC")
+
+
+RF_ROTC_Nor$finalModel
+plot(RF_ROTC_Nor,type = c("o","g"))
+
+## ROTC Kfold Mean ROC
+KfoldROC_ROTC <- RF_ROTC_Nor$resample
+mean(KfoldROC_ROTC$ROC)
+sd(KfoldROC_ROTC$ROC)
+
+write.csv(KfoldROC_ROTC, file = "Output/RF_KfoldROC_ROTC_100.csv")
+
+# Build the Varsiables Importantance table 
+VarImp_ROTC_Nor <- varImp(RF_ROTC_Nor)[[1]] %>% 
+  mutate(ROTC_Nor_Variables = rownames(.)) %>% 
+  setDT() %>% 
+  .[, .SD, .SDcols = c("ROTC_Nor_Variables", "Overall")] %>% 
+  .[order(-Overall)]
+
+write.csv(VarImp_ROTC_Nor, file = "Output/RF_VarImp_ROTC_Nor_100.csv")
+
+ggplot(VarImp_ROTC_Nor[c(1:20), ], 
+       aes(x=reorder(ROTC_Nor_Variables, Overall), y=Overall, fill=Overall))+ 
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Variable Importance")+
+  xlab("")+
+  ggtitle("Variables Importance ROTC_Nor")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+
+png("Output/Slides/RF_VariablesImportance_ROTC_100.png", width = 8, height = 6, units = 'in', res = 300)
+ggplot(VarImp_ROTC_Nor[c(1:20), ],
+       aes(x=reorder(ROTC_Nor_Variables, Overall), y=Overall, fill=Overall))+
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Variable Importance")+
+  xlab("")+
+  ggtitle("Variables Importance ROTC_Nor")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+dev.off()
+
+## predict the result 
+RF_pred_ROTC_Nor <- predict.train(RF_ROTC_Nor, 
+                                 newdata = TestData_ROTC_Nor[, -1], 
+                                 type = "raw")
+
+## confusionMatrix
+Conf_RF_ROTC_Nor <- caret::confusionMatrix(RF_pred_ROTC_Nor, TestData_ROTC_Nor$IPOFail)
+
+Conf_RF_ROTC_Nor$table %>% 
+  kable(., caption = "ConfusionMatrix_ROTC_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+### ROC Plot 
+RF_probability_ROTC_Nor <- predict.train(RF_ROTC_Nor, 
+                                        newdata = TestData_ROTC_Nor[, -1], 
+                                        type = "prob") %>% 
+  pull(X1)
+
+RF_pred_ROTC_Nor <- ROCR::prediction(RF_probability_ROTC_Nor, labels = TestData_ROTC_Nor$IPOFail)
+RF_perf_ROTC_Nor <- performance(RF_pred_ROTC_Nor, measure = "tpr", x.measure = "fpr")
+#計算AUC
+RF_auc_ROTC_Nor <- performance(RF_pred_ROTC_Nor, "auc")
+
+# Plot the ROC
+
+plot(RF_perf_ROTC_Nor, 
+     colorize=TRUE, 
+     main = "ROC curve_ROTC_Nor", 
+     xlab = "1-Specificity(FPR)", 
+     ylab = "Sensitivity(TPR)")
+
+# png("Output/Slides/ROC_RF_perf_ROTC_Nor.png", width = 8, height = 6, units = 'in', res = 300)
+# plot(RF_perf_ROTC_Nor, 
+#      colorize=TRUE, 
+#      main = "ROC curve_ROTC_Nor", 
+#      xlab = "1-Specificity(FPR)", 
+#      ylab = "Sensitivity(TPR)")
+# dev.off()
+
+# Print AUC value
+RF_auc_ROTC_Nor@y.values[[1]] %>% 
+  kable(., caption = "AUC_ROTC_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+
+```
+
+## RandomForest IPO+ROTC
+
+* 丟入 IPO 與ROTC 中 RIS 變數重要性 > 10 的變數，作為All Data
+
+* RF_VariablesImportance_100.png IPO+ROTC 變數 做repeated 100次後之變數重要性結果。
+
+* KfoldROC_AllVars_100.csv 
+
+
+```{r IPO與ROTC的顯著變數}
+
+## IPO 的顯著變數
+IPO_ImportantVars <- VarImp_IPO_Nor %>% 
+  .[Overall >= 10] %>% 
+  pull(IPO_Nor_Variables)
+
+# 把因為跑模型自動變dummy 的名稱改回來
+# IPO_ImportantVars[c(2, 4, 12)] <- c("Big4Natl", "ElectricOrNot", "NumIPOSign") # 10times
+IPO_ImportantVars[c(1, 7, 10)] <- c("Big4Natl", "ElectricOrNot", "NumIPOSign") # 100 times 
+
+## ROTC 的顯著變數
+ROTC_ImportantVars <- VarImp_ROTC_Nor %>% 
+  .[Overall >= 10] %>% 
+  pull(ROTC_Nor_Variables)
+
+# 把因為跑模型自動變dummy 的名稱改回來
+# ROTC_ImportantVars[c(6, 10)] <- c("NegativeNetIncome", "Dividend_Dummy") # 10times
+ROTC_ImportantVars[c(7, 13)] <- c("NegativeNetIncome", "Dividend_Dummy") # 100 times
+
+
+```
+
+```{r DataAllVariables_WithNormalization, echo = TRUE, message= FALSE, warning= FALSE}
+Data_IPOAndROTC_Important_Nor <- Data_AllVariable_Nor %>% 
+  .[, .SD, .SDcols = c("Firms", "IPOFail", ROTC_ImportantVars, IPO_ImportantVars)]
+
+## Training and Test For All Variables
+TrainingData_All_Nor <- GetTrainingAndTestingData(Data_IPOAndROTC_Important_Nor, 
+                                                  0.8, 1, SeedNumber = 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+
+TestData_All_Nor <- GetTrainingAndTestingData(Data_IPOAndROTC_Important_Nor, 
+                                              0.8, 0, SeedNumber = 150) %>% 
+  .[, -1] %>% 
+  as.data.frame() %>% 
+  mutate(IPOFail = factor(IPOFail, 
+                          labels = make.names(levels(IPOFail))))
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     number = 5, 
+                     repeats = 20,
+                     verboseIter = T, 
+                     summaryFunction = twoClassSummary, 
+                     classProbs = T, 
+                     sampling = "rose", 
+                     savePredictions = T)
+
+set.seed(6000)
+RF_AllVars_Nor <- train(IPOFail ~ ., 
+                        data = TrainingData_All_Nor, 
+                        method = "ranger", 
+                        importance = "permutation", 
+                        trControl = ctrl,
+                        # tuneGrid = expand.grid(.mtry = 2:30, 
+                        #                        .splitrule = "gini",
+                        #                        .min.node.size = 1:10),
+                        tuneLength = 9,
+                        preProc=c("center", "scale"),
+                        metric = "ROC")
+
+RF_AllVars_Nor$finalModel
+plot(RF_AllVars_Nor,type = c("o","g"))
+
+## IPO+ROTC Kfold Mean ROC
+KfoldROC_AllVars <- RF_AllVars_Nor$resample
+mean(KfoldROC_AllVars$ROC)
+
+write.csv(KfoldROC_AllVars, file = "Output/RF_KfoldROC_AllVars_100.csv")
+
+# Build the Varsiables Importantance table 
+VarImp_AllVars_Nor <- varImp(RF_AllVars_Nor)[[1]] %>% 
+  mutate(All_Nor_Variables = rownames(.)) %>% 
+  setDT() %>% 
+  .[, .SD, .SDcols = c("All_Nor_Variables", "Overall")] %>% 
+  .[order(-Overall)]
+
+write.csv(VarImp_AllVars_Nor, file = "Output/RF_VarImp_AllVars_Nor.csv")
+
+ggplot(VarImp_AllVars_Nor[c(1:20), ], 
+       aes(x=reorder(All_Nor_Variables, Overall), y=Overall, fill=Overall))+ 
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Variable Importance")+
+  xlab("")+
+  ggtitle("Variables Importance AllVars_Nor")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+
+png("Output/Slides/RF_VariablesImportance_AllVars_100.png", width = 8, height = 6, units = 'in', res = 300)
+ggplot(VarImp_AllVars_Nor[c(1:20), ],
+       aes(x=reorder(All_Nor_Variables, Overall), y=Overall, fill=Overall))+
+  geom_bar(stat="identity", position="dodge")+ coord_flip()+
+  ylab("Variable Importance")+
+  xlab("")+
+  ggtitle("Variables Importance AllVars_Nor")+
+  guides(fill=F)+
+  scale_fill_gradient(low="red", high="blue")
+dev.off()
+
+## predict the result 
+RF_pred_All_Nor <- predict.train(RF_AllVars_Nor, 
+                                 newdata = TestData_All_Nor[, -1], 
+                                 type = "raw")
+
+## confusionMatrix
+Conf_RF_All_Nor <- caret::confusionMatrix(RF_pred_All_Nor, TestData_All_Nor$IPOFail)
+
+Conf_RF_All_Nor$table %>% 
+  kable(., caption = "ConfusionMatrix_All_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+### ROC Plot 
+RF_probability_All_Nor <- predict.train(RF_AllVars_Nor, 
+                                        newdata = TestData_All_Nor[, -1], 
+                                        type = "prob") %>% 
+  pull(X1)
+
+RF_pred_All_Nor <- ROCR::prediction(RF_probability_All_Nor, labels = TestData_All_Nor$IPOFail)
+RF_perf_All_Nor <- performance(RF_pred_All_Nor, measure = "tpr", x.measure = "fpr")
+#計算AUC
+RF_auc_All_Nor <- performance(RF_pred_All_Nor, "auc")
+
+# Plot the ROC
+
+plot(RF_perf_All_Nor, 
+     colorize=TRUE, 
+     main = "ROC curve_AllVars_Nor", 
+     xlab = "1-Specificity(FPR)", 
+     ylab = "Sensitivity(TPR)")
+
+# png("Output/Slides/ROC_RF_perf_All_Nor.png", width = 8, height = 6, units = 'in', res = 300)
+# plot(RF_perf_All_Nor, 
+#      colorize=TRUE, 
+#      main = "ROC curve_AllVars_Nor", 
+#      xlab = "1-Specificity(FPR)", 
+#      ylab = "Sensitivity(TPR)")
+# dev.off()
+
+# Print AUC value
+RF_auc_All_Nor@y.values[[1]] %>% 
+  kable(., caption = "AUC_All_Nor", align = "l") %>% 
+  kable_styling(full_width = TRUE)
+
+
+```
+
