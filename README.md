@@ -29,9 +29,11 @@
 	透過BuildLogisticRegressionModel_2.Rmd 將所有變數整合後丟入 Logistic Regression 中，透過多次CV之結果發現Logistic Regression 相對於其他兩個模型來說會有較好的表現(AUC 平均為 78.09 %)。
 	
 6. RandomForest.Rmd
+	
 	透過 RandomForest.Rmd 將所有變數整合後丟入 Random Forest 中，透過多次CV後發現 AUC 平均為 75.39 %。
 	
 7. XGBoost.Rmd
+	
 	透過 XGBoost.Rmd 將所有變數整合後丟入 Extreme Gradient Boosting 中，透過多次CV後發現 AUC 平均為 74.42 %。
 
 8. Variables_Summary.Rmd
